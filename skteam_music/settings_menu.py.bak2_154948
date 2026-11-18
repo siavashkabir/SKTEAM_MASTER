@@ -1,0 +1,410 @@
+"""پنل تنظیمات اصلی Sk.Team"""
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+import settings as cfg
+
+CB = {
+    "skin":    "set:skin",
+    "sub":     "set:sub",
+    "player":  "set:player",
+    "tools":   "set:tools",
+    "stats":   "set:stats",
+    "back":    "set:back",
+    "close":   "set:close",
+}
+
+def _b(t, cb): return InlineKeyboardButton(t, callback_data=cb)
+
+
+
+def record_menu(chat_id):
+    """منوی رکورد ویس‌کال"""
+    import sqlite3
+    from pathlib import Path as _P
+    _db = _P(__file__).parent / "data" / "settings.db"
+    _clip = 300
+    _enabled = 0
+    try:
+        _c = sqlite3.connect(str(_db))
+        _c.execute("""CREATE TABLE IF NOT EXISTS record_settings (
+            chat_id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            clip_sec INTEGER DEFAULT 300,
+            updated_at INTEGER)""")
+        _c.commit()
+        _r = _c.execute("SELECT enabled, clip_sec FROM record_settings WHERE chat_id=?",
+                        (chat_id,)).fetchone()
+        if _r:
+            _enabled, _clip = _r[0], _r[1]
+        _c.close()
+    except Exception:
+        pass
+
+    clip_label = {
+        60: "۱ دقیقه", 180: "۳ دقیقه", 300: "۵ دقیقه",
+        600: "۱۰ دقیقه", 900: "۱۵ دقیقه",
+        1800: "۳۰ دقیقه", 3600: "۱ ساعت",
+    }.get(_clip, f"{_clip} ثانیه")
+
+    status_icon = "✅" if _enabled else "❌"
+    status_txt = "فعال" if _enabled else "خاموش"
+
+    text = (
+        f"🎙 **ضبط ویس‌کال**\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"{status_icon} وضعیت: {status_txt}\n"
+        f"⏱ طول هر کلیپ: {clip_label}\n"
+        f"📤 ارسال به: PV مالک گروه\n\n"
+        f"⚠️ وقتی موزیک پخش می‌شه، ضبط خودکار pause می‌شه\n"
+        f"و بعد پایان موزیک دوباره active می‌شه."
+    )
+    kb = [
+        [_b(f"{status_icon} {'خاموش کردن' if _enabled else 'فعال کردن'}",
+            "set:rec_toggle")],
+        [_b(f"⏱ تغییر طول کلیپ ({clip_label})", "set:rec_clip")],
+        [_b("🔙 بازگشت", CB["back"]),
+         _b("❌ بستن", CB["close"])],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+
+def record_clip_menu(chat_id):
+    """انتخاب طول کلیپ با تیک روی فعلی"""
+    import sqlite3
+    from pathlib import Path as _P
+    _db = _P(__file__).parent / "data" / "settings.db"
+    _clip = 300
+    try:
+        _c = sqlite3.connect(str(_db))
+        _r = _c.execute("SELECT clip_sec FROM record_settings WHERE chat_id=?",
+                        (chat_id,)).fetchone()
+        if _r:
+            _clip = _r[0]
+        _c.close()
+    except Exception:
+        pass
+
+    clips = [
+        (60, "۱ دقیقه"), (180, "۳ دقیقه"), (300, "۵ دقیقه"),
+        (600, "۱۰ دقیقه"), (900, "۱۵ دقیقه"),
+        (1800, "۳۰ دقیقه"), (3600, "۱ ساعت"),
+    ]
+    rows = []
+    for i in range(0, len(clips), 2):
+        row = []
+        for j in range(2):
+            if i + j < len(clips):
+                sec, lbl = clips[i + j]
+                mark = "✅ " if sec == _clip else ""
+                row.append(_b(f"{mark}⏱ {lbl}", f"set:rec_clip_set:{sec}"))
+        rows.append(row)
+    rows.append([_b("🔙 بازگشت", "set:rec")])
+
+    current = next((lbl for sec, lbl in clips if sec == _clip), f"{_clip}s")
+    return (
+        f"⏱ **طول هر کلیپ ضبط**\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"✅ فعلی: {current}\n\n"
+        f"انتخاب کن هر چند وقت یه بار برات فایل بفرستم:",
+        InlineKeyboardMarkup(rows),
+    )
+
+def main_menu(chat_id, chat_title, user_name, is_owner):
+    """پنل تنظیمات اصلی"""
+    s = cfg.get(chat_id)
+    role = "👑 سازنده" if is_owner else "⭐ سودو"
+
+    # اشتراک (placeholder - بعداً به groupbot.db وصل می‌شه)
+    sub_status = "✅ فعال"
+    sub_days = "—"
+    try:
+        import sub_check
+        info = sub_check.get_subscription(chat_id)
+        sub_status = "✅ فعال" if info.get("active") else "❌ غیرفعال"
+        sub_days = info.get("days_left", "—")
+    except Exception:
+        pass
+
+    text = (
+        f"⚙️ پنل تنظیمات Sk.Team\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"📍 گروه: {chat_title}\n"
+        f"👤 شما: {user_name} ({role})\n"
+        f"\n"
+        f"┌─ وضعیت اشتراک ─────┐\n"
+        f"│ 🎵 موزیک‌پلیر      │\n"
+        f"│ {sub_status:<8}          │\n"
+        f"│ 📅 باقی‌مانده: {sub_days}\n"
+        f"└────────────────────┘\n"
+        f"\n"
+        f"🎨 اسکین فعلی: {s['skin']}"
+    )
+    kb = [
+        [_b("🎨 اسکین پنل", CB["skin"]),
+         _b("💎 اشتراک", CB["sub"])],
+        [_b("🎛 تنظیمات پلیر", CB["player"]),
+         _b("🎞 گیف‌ها", "set:gifs")],
+        [_b("🔧 ابزارها", CB["tools"])],
+        [_b("📊 آمار", CB["stats"])],
+        [_b("❌ بستن", CB["close"])],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+def sub_menu(chat_id):
+    text = (
+        "💎 اشتراک Sk.Team Music\n"
+        "━━━━━━━━━━━━━━━━━\n\n"
+        "🎵 موزیک‌پلیر:\n"
+        "   وضعیت: —\n"
+        "   تاریخ انقضا: —\n"
+        "   روزهای مانده: —\n\n"
+        "🎙 ریکورد ویس‌کال:\n"
+        "   وضعیت: —\n"
+        "   تاریخ انقضا: —\n\n"
+        "📞 برای تمدید با سازنده تماس بگیرید\n"
+        "   @Siavashska"
+    )
+    kb = [
+        [_b("🔄 تمدید", "set:sub_renew"),
+         _b("📜 تاریخچه", "set:sub_history")],
+        [_b("🔙 بازگشت", CB["back"]),
+         _b("❌ بستن", CB["close"])],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+def player_menu(chat_id):
+    s = cfg.get(chat_id)
+    text = (
+        "🎛 تنظیمات پلیر\n"
+        "━━━━━━━━━━━━━━━━━\n\n"
+        f"⏱ زمان بروزرسانی: {s['refresh_sec']} ثانیه\n"
+        f"🗑 پاکسازی خودکار پیام: {s['auto_delete_sec']} ثانیه\n"
+        f"🎞 نمایش GIF: {'✅' if s['gif_enabled'] else '❌'}\n"
+    )
+    kb = [
+        [_b(f"⏱ {s['refresh_sec']}s", "set:cfg_refresh")],
+        [_b(f"🗑 {s['auto_delete_sec']}s", "set:cfg_delete")],
+        [_b("🔙 بازگشت", CB["back"]),
+         _b("❌ بستن", CB["close"])],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+def tools_menu(chat_id):
+    text = (
+        "🔧 ابزارها\n"
+        "━━━━━━━━━━━━━━━━━\n\n"
+        "🔄 ریست پلیر — kill و راه‌اندازی مجدد\n"
+        "🧹 پاک کش — حذف فایل‌های دانلود شده\n"
+        "📊 وضعیت سرور — پینگ و queue"
+    )
+    kb = [
+        [_b("🔄 ریست پلیر", "set:tool_reset")],
+        [_b("🆑 ریست CURRENT", "set:tool_resetcurrent")],
+        [_b("🧹 پاک کش", "set:tool_clearcache")],
+        [_b("📊 وضعیت سرور", "set:tool_health")],
+        [_b("🔙 بازگشت", CB["back"]),
+         _b("❌ بستن", CB["close"])],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+def skins_menu(chat_id, preview=None):
+    """منوی اسکین با پیش‌نمایش + دکمه‌ها"""
+    s = cfg.get(chat_id)
+    import panels
+    current = s["skin"]
+
+    # ─── اگه preview ───
+    if preview and preview in panels.SKINS:
+        demo = {
+            "playing": True, "paused": False, "muted": False,
+            "title": "Googoosh - Noghteye Payan",
+            "position": 45, "duration": 240,
+            "volume": 100, "speed": 1.0,
+            "source": "SoundCloud", "requested_by_name": "Siavash",
+            "eq": "Off", "repeat": "off", "shuffle": False,
+        }
+        try:
+            prev_text, prev_kb = panels.render(preview, demo)
+        except Exception as e:
+            prev_text = f"❌ خطا: {e}"
+            prev_kb = None
+
+        text = (
+            f"🎨 پیش‌نمایش اسکین\n"
+            f"━━━━━━━━━━━━━━━━━\n"
+            f"🎯 {panels.SKIN_LABELS.get(preview, preview)}\n"
+            f"⚠️ (آهنگ نمونه — دکمه‌ها تستی)\n"
+            f"\n{prev_text}"
+        )
+        # ★ ترکیب دکمه‌های پیش‌نمایش + کنترل‌های منو
+        rows = []
+        if prev_kb and prev_kb.inline_keyboard:
+            # فقط ۲ ردیف اول از پیش‌نمایش
+            for row in prev_kb.inline_keyboard[:3]:
+                rows.append(row)
+        # دکمه‌های منو
+        rows.append([
+            _b("✅ تایید و اعمال", f"set:skin_apply:{preview}"),
+        ])
+        rows.append([
+            _b("🔙 برگشت به لیست", "set:skin"),
+            _b("❌ بستن", CB["close"]),
+        ])
+        return text, InlineKeyboardMarkup(rows)
+
+    # ─── منوی اصلی ───
+    rows = []
+    # ★ اسکین‌ها توی ردیف‌های ۲ تایی
+    items = list(panels.SKINS)
+    for i in range(0, len(items), 2):
+        row = []
+        for j in range(2):
+            if i + j < len(items):
+                sk = items[i + j]
+                mark = "✅ " if sk == current else ""
+                row.append(_b(f"{mark}{panels.SKIN_LABELS.get(sk, sk)}",
+                              f"set:skin_prev:{sk}"))
+        rows.append(row)
+    rows.append([_b("🔙 بازگشت", CB["back"]), _b("❌ بستن", CB["close"])])
+    text = (
+        f"🎨 انتخاب اسکین پنل\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"🎯 فعلی: {panels.SKIN_LABELS.get(current, current)}\n"
+        f"📊 {len(items)} اسکین موجود\n\n"
+        f"برای پیش‌نمایش، روی هر اسکین بزن."
+    )
+    return text, InlineKeyboardMarkup(rows)
+
+def stats_menu(chat_id):
+    text = (
+        "📊 آمار Sk.Team Music\n"
+        "━━━━━━━━━━━━━━━━━\n\n"
+        "🎵 تعداد پخش‌ها: —\n"
+        "⏱ مجموع زمان پخش: —\n"
+        "👥 کاربران فعال: —\n"
+        "📋 صف فعلی: —"
+    )
+    kb = [
+        [_b("🔙 بازگشت", CB["back"]), _b("❌ بستن", CB["close"])],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+# ─── GIF Menu ───
+def gifs_menu(chat_id):
+    import gifs
+    s = cfg.get(chat_id)
+    items = gifs.list_all(chat_id)
+    n = len(items)
+    active = gifs.active(chat_id)
+    active_name = active["name"] if active else "—"
+
+    text = (
+        f"🎞 گیف‌های پلیر\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"📊 وضعیت: {'✅ فعال' if s['gif_enabled'] else '❌ غیرفعال'}\n"
+        f"📁 تعداد: {n}\n"
+        f"⭐ فعال: {active_name}\n"
+    )
+    if n == 0:
+        text += "\n⚠️ هنوز گیفی اضافه نشده.\n"
+
+    rows = []
+    rows.append([
+        _b(f"🎞 {'خاموش کن' if s['gif_enabled'] else 'روشن کن'}", "set:gif_toggle"),
+    ])
+    rows.append([_b("➕ افزودن گیف جدید", "set:gif_add")])
+    for it in items[:10]:
+        star = "⭐" if it["is_active"] else "⚪"
+        nm = it["name"][:15]
+        rows.append([
+            _b(f"{star} {nm}", f"set:gif_act:{it['id']}"),
+            _b("🗑", f"set:gif_del:{it['id']}"),
+        ])
+    rows.append([_b("🔙 بازگشت", CB["back"]), _b("❌ بستن", CB["close"])])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def edit_message_menu():
+    """منوی ویرایش پیام‌های ربات (فقط سازنده)"""
+    import settings as cfg_m
+    all_cfg = cfg_m.get_all_cfg()
+
+    def short(s, n=40):
+        s = (s or "").replace("\n", " ")
+        return s[:n] + ("..." if len(s) > n else "")
+
+    text = (
+        f"✏️ **ویرایش پیام‌های ربات**\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"اینجا می‌تونی پیام‌های ربات رو ویرایش کنی:"
+    )
+    kb = [
+        [_b(f"📝 عنوان: {short(all_cfg['welcome_title'], 25)}", "editmsg:title")],
+        [_b("📄 متن معرفی", "editmsg:intro")],
+        [_b("📞 خط تماس", "editmsg:contact")],
+        [_b("📢 کانال (متن)", "editmsg:channel")],
+        [_b("🔗 لینک کانال", "editmsg:channel_url")],
+        [_b("🌐 وب‌سایت (متن)", "editmsg:website")],
+        [_b("🔗 لینک وب‌سایت", "editmsg:website_url")],
+        [_b("👤 لینک تماس", "editmsg:creator_url")],
+        [_b("👁 پیش‌نمایش", "editmsg:preview")],
+        [_b("🔄 بازگشت به پیش‌فرض", "editmsg:reset")],
+        [_b("❌ بستن", CB["close"])],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def edit_msg_field_menu(field):
+    """منوی ویرایش یه فیلد خاص"""
+    import settings as cfg_m
+    all_cfg = cfg_m.get_all_cfg()
+    labels = {
+        "title": "📝 عنوان",
+        "intro": "📄 متن معرفی",
+        "contact": "📞 خط تماس",
+        "channel": "📢 متن کانال",
+        "channel_url": "🔗 لینک کانال",
+        "website": "🌐 متن وب‌سایت",
+        "website_url": "🔗 لینک وب‌سایت",
+        "creator_url": "👤 لینک تماس سازنده",
+    }
+    current = all_cfg.get(field, "")
+    preview = current[:300] + ("..." if len(current) > 300 else "")
+    text = (
+        f"✏️ **ویرایش: {labels.get(field, field)}**\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"📌 مقدار فعلی:\n"
+        f"`{preview}`\n\n"
+        f"مقدار جدید رو بفرست (Reply این پیام):"
+    )
+    kb = [
+        [_b("🗑 پاک کردن", f"editmsg_clear:{field}")],
+        [_b("🔄 بازگشت به پیش‌فرض", f"editmsg_resetfield:{field}")],
+        [_b("🔙 بازگشت", "editmsg_open")],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def edit_msg_preview():
+    """پیش‌نمایش پیام نهایی"""
+    import settings as cfg_m
+    cfg = cfg_m.get_all_cfg()
+    text = (
+        f"👁 **پیش‌نمایش پیام /start**\n"
+        f"━━━━━━━━━━━━━━━━━\n\n"
+        f"{cfg['welcome_title']}\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"سلام [نام کاربر] 👋\n\n"
+        f"{cfg['welcome_intro']}\n\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"{cfg['footer_contact']}"
+    )
+    if cfg.get('footer_channel'):
+        text += f"\n{cfg['footer_channel']}"
+    if cfg.get('footer_website'):
+        text += f"\n{cfg['footer_website']}"
+    kb = [
+        [_b("🔙 بازگشت", "editmsg_open")],
+    ]
+    return text, InlineKeyboardMarkup(kb)

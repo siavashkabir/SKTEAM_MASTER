@@ -1,0 +1,64 @@
+"""
+ماژول دستور /reset برای ری‌فرش گروه
+فقط برای سازنده و سودوها
+"""
+from telegram import Update
+from telegram.ext import ContextTypes, CommandHandler, ApplicationHandlerStop
+import datetime
+
+
+async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not msg or not chat or not user:
+        return
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    # چک دسترسی: فقط Owner و Sudo
+    try:
+        from config import OWNER_ID
+        from database import is_bot_owner_or_sudo
+        if user.id != OWNER_ID and not is_bot_owner_or_sudo(user.id):
+            return
+    except Exception:
+        return
+
+    status_msg = await msg.reply_text("🔄 در حال ری‌فرش گروه...")
+
+    try:
+        # ۱. شمارش و پاک‌سازی کش حافظه‌ی گروه
+        cleared_chat = len(context.chat_data)
+        context.chat_data.clear()
+
+        # ۲. لاگ
+        log_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[RESET] Group {chat.id} reset by user {user.id} at {log_time}")
+
+        # ۳. پیام تأیید
+        text = (
+            "✅ *گروه با موفقیت ری‌فرش شد*\n\n"
+            f"👤 توسط: {user.first_name}\n"
+            f"🧹 کش گروه: {cleared_chat} آیتم پاک شد\n"
+            f"🕒 زمان: {log_time}"
+        )
+        await status_msg.edit_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        print(f"[RESET ERR] {e}")
+        try:
+            await status_msg.edit_text(f"❌ خطا در ری‌فرش: {e}")
+        except Exception:
+            pass
+
+    raise ApplicationHandlerStop
+
+
+def register(app):
+    app.add_handler(
+        CommandHandler(["reset", "ريست", "ریست"], reset_cmd),
+        group=-2
+    )
+    print("OK module reset_cmd loaded")

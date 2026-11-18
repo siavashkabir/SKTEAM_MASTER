@@ -1,0 +1,2786 @@
+#!/usr/bin/env python3
+"""Sk.Team Music Bot - v3 with inline panel"""
+import os, sys, re, time, asyncio, logging, random
+from pathlib import Path
+import httpx
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    filters, ContextTypes
+)
+
+# ─── Role-based jokes (v2) ───
+import jokes_role as _jr
+
+def j_play(uid=None, cid=None):  return _jr.play(uid or 0, cid or 0)
+def j_stop(uid=None, cid=None):  return _jr.stop(uid or 0, cid or 0)
+def j_pause(uid=None, cid=None): return _jr.pause(uid or 0, cid or 0)
+def j_resume(uid=None, cid=None):return _jr.resume(uid or 0, cid or 0)
+def j_next(uid=None, cid=None):  return _jr.next_(uid or 0, cid or 0)
+def j_ping():                     return _jr.ping()
+def j_err():                      return _jr.error()
+def j_notauth():                  return _jr.not_auth()
+def j_nosub():                    return _jr.no_sub()
+def j_vol():                      return _jr.volume()
+def j_call_owner():               return _jr.call(7955185125, 0)
+def j_call_user(uid=None, cid=None): return _jr.call(uid or 999, cid or 0)
+def j_reset(uid):                 return _jr.reset(uid)
+def j_hard_reset(uid):            return _jr.hard_reset(uid)
+import db, settings, panels, settings_menu
+
+BOT_TOKEN = "8898616887:AAFxBFr_xXxwzZEV7STjqn22tHdB-0c4rIw"
+OWNER_ID_REC = 7955185125
+SK_SERVER = "http://127.0.0.1:8080"
+
+BASE = Path(__file__).parent
+gif_add_wait = {}
+active_panels = {}
+submenu_locks = {}  # {chat_id: timestamp}  # {chat_id: True} — وقتی کاربر توی زیرمنو
+pinned_msgs = {}  # {chat_id: message_id}
+not_playing_counter = {}  # {chat_id: int}
+LOG_DIR = BASE / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[logging.FileHandler(LOG_DIR / "bot.log"), logging.StreamHandler()],
+)
+log = logging.getLogger("skteam")
+
+# ─── اتصال مستقیم به اشتراک‌های groupbot ───
+_GB_DB = Path.home() / "groupbot" / "data" / "groupbot.db"
+
+def _sub_is_active(chat_id, sub_type):
+    """چک اشتراک از groupbot.db (مسیر مطلق)"""
+    import sqlite3 as _s
+    from datetime import datetime as _dt
+    if not _GB_DB.exists():
+        log.warning(f"[sub] DB نیست: {_GB_DB}")
+        return False
+    try:
+        conn = _s.connect(str(_GB_DB), timeout=5)
+        r = conn.execute(
+            "SELECT expire_date, enabled FROM subscriptions WHERE chat_id=? AND sub_type=?",
+            (chat_id, sub_type)
+        ).fetchone()
+        conn.close()
+        if not r:
+            return False
+        exp_str, enabled = r
+        if not enabled:
+            return False
+        try:
+            exp = _dt.strptime(exp_str.split()[0], "%Y-%m-%d")
+            return exp > _dt.now()
+        except Exception:
+            return False
+    except Exception as e:
+        log.warning(f"[sub] err: {e}")
+        return False
+
+
+def _sub_days(chat_id, sub_type):
+    """روزهای مانده"""
+    import sqlite3 as _s
+    from datetime import datetime as _dt
+    if not _GB_DB.exists():
+        return 0
+    try:
+        conn = _s.connect(str(_GB_DB), timeout=5)
+        r = conn.execute(
+            "SELECT expire_date, enabled FROM subscriptions WHERE chat_id=? AND sub_type=?",
+            (chat_id, sub_type)
+        ).fetchone()
+        conn.close()
+        if not r or not r[1]:
+            return 0
+        try:
+            exp = _dt.strptime(r[0].split()[0], "%Y-%m-%d")
+            delta = (exp - _dt.now()).days
+            return max(0, delta)
+        except Exception:
+            return 0
+    except Exception:
+        return 0
+
+
+_FA = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+def fa2en(s): return s.translate(_FA)
+
+# ─── global state ───
+
+
+# ─── auto-delete (with panel timer reset) ───
+_panel_timers = {}
+
+async def _auto_delete_task(key, sec, msg):
+    try:
+        await asyncio.sleep(sec)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+    except asyncio.CancelledError:
+        pass
+    finally:
+        info = _panel_timers.get(key)
+        if info and info.get('task') is asyncio.current_task():
+            _panel_timers.pop(key, None)
+
+def schedule_delete(context, msg, sec=40):
+    if msg is None:
+        return
+    key = (msg.chat.id, msg.message_id)
+    old = _panel_timers.get(key)
+    if old:
+        try: old['task'].cancel()
+        except Exception: pass
+    task = context.application.create_task(_auto_delete_task(key, sec, msg))
+    _panel_timers[key] = {'task': task, 'sec': sec, 'msg': msg}
+
+def reset_panel_timer(chat_id, message_id):
+    key = (chat_id, message_id)
+    info = _panel_timers.get(key)
+    if not info:
+        return
+    sec = info.get('sec', 60)
+    msg = info.get('msg')
+    if not msg:
+        return
+    old_task = info.get('task')
+    if old_task:
+        try: old_task.cancel()
+        except Exception: pass
+    try:
+        loop = asyncio.get_event_loop()
+        new_task = loop.create_task(_auto_delete_task(key, sec, msg))
+        info['task'] = new_task
+    except Exception:
+        pass
+
+# ─── auth ───
+async def is_owner_or_sudo(uid):
+    return db.is_owner(uid) or db.is_sudo(uid)
+
+async def can_play(uid, cid):
+    if db.is_owner(uid) or db.is_sudo(uid): return True
+    # ★ سودوهای groupbot (bot_admins)
+    try:
+        import sqlite3 as _s
+        _gb = Path.home() / "groupbot" / "data" / "groupbot.db"
+        if _gb.exists():
+            _c = _s.connect(str(_gb), timeout=3)
+            _r = _c.execute("SELECT 1 FROM bot_admins WHERE user_id=?", (uid,)).fetchone()
+            _c.close()
+            if _r:
+                return True
+    except Exception:
+        pass
+    # ★ مالک پلیر
+    try:
+        import sqlite3 as _s
+        _p = Path.home() / "skteam_music" / "data" / "settings.db"
+        _c = _s.connect(str(_p), timeout=3)
+        _r = _c.execute(
+            "SELECT 1 FROM sk_group_owners WHERE chat_id=? AND user_id=?",
+            (cid, uid)
+        ).fetchone()
+        _c.close()
+        if _r:
+            return True
+    except Exception:
+        pass
+    return db.is_music_authorized(cid, uid)
+
+# ─── server helpers ───
+async def send_speed(cid, delta=None, reset=False):
+    """تغییر سرعت پخش"""
+    if reset:
+        return await post_cmd({"action": "speed", "chat_id": cid, "value": 1.0})
+    return await post_cmd({
+        "action": "speed_delta",
+        "chat_id": cid,
+        "delta": delta,
+    })
+
+
+async def send_seek(cid, direction, secs):
+    """ارسال دستور seek"""
+    return await post_cmd({
+        "action": "seek",
+        "chat_id": cid,
+        "direction": direction,
+        "seconds": secs,
+    })
+
+
+async def add_to_queue(cid, query, uid, uname):
+    """افزودن آهنگ به صف سرور"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as h:
+            r = await h.post(f"{SK_SERVER}/queue/add", json={
+                "chat_id": cid,
+                "query": query,
+                "requested_by": uid,
+                "requested_by_name": uname or "",
+            })
+            d = r.json()
+            return d.get("size", 0)
+    except Exception as e:
+        log.warning(f"queue add err: {e}")
+        return 0
+
+
+async def post_cmd(payload):
+    try:
+        async with httpx.AsyncClient(timeout=10) as h:
+            r = await h.post(f"{SK_SERVER}/command", json=payload)
+            return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+async def get_srv(path, params=None):
+    try:
+        async with httpx.AsyncClient(timeout=5) as h:
+            r = await h.get(f"{SK_SERVER}{path}", params=params or {})
+            return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# ─── parsers ───
+# کلمات کنترل — اینا رو play نگیر
+CONTROL_WORDS = {
+    "بعدی", "قبلی", "توقف", "مکث", "ادامه", "بس کن", "استاپ",
+    "next", "prev", "previous", "skip", "stop", "pause", "resume", "continue",
+    "بی‌صدا", "باصدا", "mute", "unmute",
+    "صف", "queue", "پنل", "پلیر", "np",
+    "ریپیت", "repeat", "shuffle", "شافل",
+    "پینگ", "ping", "ریست", "reset",
+}
+
+def _is_control(q):
+    q2 = q.strip().lower()
+    return q2 in {w.lower() for w in CONTROL_WORDS}
+
+PLAY_PATTERNS = [
+    re.compile(r"^(?:پخش|بزن|پلی)\s+(.+)$"),
+    re.compile(r"^(.+?)\s+را\s+(?:پخش|بزن|پلی)(?:\s+کن)?$"),
+]
+def parse_play(text):
+    for p in PLAY_PATTERNS:
+        m = p.match(text)
+        if m:
+            q = m.group(1).strip()
+            if _is_control(q):
+                return None  # کلمه کنترل، play نیست
+            return q
+    return None
+VOL_RE = re.compile(r"^(?:(?:تنظیم|کن|بکن)\s+)?(?:ولوم|صدا|volume)\s+(\d+)$")
+
+# ─── panel ───
+async def _panel_data(chat_id):
+    """now-playing + settings → dict برای panels.render"""
+    s = settings.get(chat_id)
+    r = await get_srv("/now-playing", {"chat_id": chat_id})
+    if not r.get("playing"):
+        return {
+            "playing": False, "paused": False, "muted": False,
+            "title": "—", "position": 0, "duration": 0,
+            "volume": 100, "source": "—", "requested_by": "—",
+            "eq": "Off", "repeat": "off",
+        }, s
+    return {
+        "playing": True,
+        "paused": r.get("paused", False),
+        "muted": r.get("muted", False),
+        "title": r.get("title", "—"),
+        "position": r.get("position", 0),
+        "duration": r.get("duration", 0),
+        "volume": r.get("volume", 100),
+        "speed": r.get("speed", 1.0),
+        "source": r.get("source", "soundcloud"),
+        "requested_by": r.get("requested_by_name", "—"),
+        "requested_by_name": r.get("requested_by_name", "—"),
+        "eq": r.get("eq", "Off"),
+        "repeat": r.get("repeat", "off"),
+        "shuffle": r.get("shuffle", False),
+    }, s
+
+async def open_panel(update, context, from_cb=False):
+    chat = update.effective_chat
+    chat_id = chat.id
+    s = settings.get(chat_id)
+    data, _ = await _panel_data(chat_id)
+    text, kb = panels.render(s["skin"], data)
+    if from_cb:
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=kb)
+        except Exception as e:
+            log.warning(f"edit failed: {e}")
+    else:
+        m = await update.effective_message.reply_text(text, reply_markup=kb)
+        # توی گروه بعد ۴۰ ثانیه پاک نکن (پنل باید بمونه)
+        return m
+
+# ─── commands ───
+
+
+async def send_panel_with_gif(bot, cid, text, kb, gif_file_id, delete_old_msg_id=None):
+    """ارسال پنل با GIF بالا"""
+    if delete_old_msg_id:
+        try: await bot.delete_message(cid, delete_old_msg_id)
+        except: pass
+    try:
+        m = await bot.send_animation(
+            chat_id=cid, animation=gif_file_id,
+            caption=text, reply_markup=kb,
+        )
+        return m
+    except Exception as e:
+        log.warning(f"send_animation err: {e}")
+        m = await bot.send_message(cid, text, reply_markup=kb)
+        return m
+
+
+async def edit_panel_gif(bot, cid, msg_id, text, kb, gif_file_id):
+    """ادیت پنل موجود با GIF - بدون flicker"""
+    # ★ تلگرام caption برای animation رو محدود به 1024 char می‌کنه
+    if len(text) > 1000:
+        text = text[:997] + "..."
+    # ★ اول caption رو edit کن
+    try:
+        await bot.edit_message_caption(
+            chat_id=cid, message_id=msg_id,
+            caption=text, reply_markup=kb,
+        )
+        return True
+    except Exception as e:
+        err = str(e).lower()
+        if "not modified" in err:
+            return True
+        # اگه caption edit نشد، فقط buttons رو edit کن
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=cid, message_id=msg_id,
+                reply_markup=kb,
+            )
+            return True
+        except Exception as e2:
+            if "not modified" not in str(e2).lower():
+                log.debug(f"edit gif panel: {e2}")
+            return False
+
+
+def render_panel_with_extras(skin, data, chat_id):
+    """رندر پنل + دکمه‌های اضافه (اسکین)"""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    text, kb = panels.render(skin, data)
+    try:
+        rows = list(kb.inline_keyboard)
+        rows.append([InlineKeyboardButton("🎨 اسکین پنل", callback_data="live_skin_open")])
+        kb = InlineKeyboardMarkup(rows)
+    except Exception as e:
+        log.debug(f"skin btn err: {e}")
+    return text, kb
+
+
+async def open_live_panel(bot, chat_id, owner_uid, skin=None, force_new=False):
+    """باز کردن/ادیت پنل زنده"""
+    if skin is None:
+        skin = settings.get(chat_id)["skin"]
+    data, _ = await _panel_data(chat_id)
+    text, kb = render_panel_with_extras(skin, data, chat_id)
+
+    # ─── اگه پنل قبلی هست، فقط ادیت کن (نگه دار) ───
+    if chat_id in active_panels and not force_new:
+        old = active_panels[chat_id]
+        try:
+            await bot.edit_message_text(
+                text=text, chat_id=chat_id,
+                message_id=old["msg_id"], reply_markup=kb
+            )
+            # آپدیت owner/uid/skin
+            old["owner_uid"] = owner_uid
+            old["skin"] = skin
+            return old
+        except Exception as e:
+            # اگه edit نشد (پیام حذف شده)، پنل جدید بساز
+            log.debug(f"edit fail, creating new: {e}")
+            active_panels.pop(chat_id, None)
+
+    # ─── چک GIF فعال ───
+    gif_id = None
+    try:
+        import gifs as _gm
+        s_cfg = settings.get(chat_id)
+        if s_cfg.get("gif_enabled"):
+            gif = _gm.active(chat_id)
+            if gif:
+                gif_id = gif["file_id"]
+    except Exception as e:
+        log.debug(f"gif check: {e}")
+
+    # ─── پنل جدید بساز ───
+    if gif_id:
+        # با GIF
+        m = await send_panel_with_gif(bot, chat_id, text, kb, gif_id)
+        active_panels[chat_id] = {
+            "msg_id": m.message_id,
+            "owner_uid": owner_uid,
+            "skin": skin,
+            "ever_played": False,
+            "has_gif": True,
+            "gif_id": gif_id,
+        }
+        log.warning(f'[PANEL] ADD {chat_id} msg={m.message_id}')
+    else:
+        # بدون GIF
+        m = await bot.send_message(chat_id, text, reply_markup=kb)
+        active_panels[chat_id] = {
+            "msg_id": m.message_id,
+            "owner_uid": owner_uid,
+            "skin": skin,
+            "ever_played": False,
+            "has_gif": False,
+        }
+        log.warning(f'[PANEL] ADD {chat_id} msg={m.message_id}')
+    return m
+
+
+async def close_live_panel(bot, chat_id):
+    """بستن پنل زنده"""
+    if chat_id not in active_panels:
+        return
+    log.warning(f"[CLOSE] {chat_id}")
+    info = active_panels.pop(chat_id)
+    try:
+        await bot.delete_message(chat_id, info["msg_id"])
+    except Exception:
+        pass
+
+
+async def panel_updater_loop(app):
+    """Job - هر ۳ ثانیه پنل‌ها رو update کن"""
+    log.info("panel_updater_loop started")
+    GRACE = 10  # ۱۰ بار = ۳۰ ثانیه صبر قبل بستن
+    while True:
+        await asyncio.sleep(3)
+        # ★ TICK LOG
+        tick = locals().get('tick', 0) + 1
+        if tick % 10 == 0:
+            log.warning(f'[LOOP] tick #{tick} active={len(active_panels)} locks={len(submenu_locks)}')
+        # ★ چک pending records
+        try:
+            import httpx as _hr
+            import os as _or
+            async with _hr.AsyncClient(timeout=5) as _chr:
+                _rr = await _chr.get(f"{SK_SERVER}/pending_records")
+                _dr = _rr.json()
+                for _fr in _dr.get("files", []):
+                    _path = _fr.get("path", "")
+                    # مسیر مشترک با Termux
+                    if _or.path.exists(_path):
+                        _clip = _fr.get("clip_sec", 0)
+                        _ts = _fr.get("ts", 0)
+                        from datetime import datetime as _dt
+                        _dt_str = _dt.fromtimestamp(_ts).strftime("%Y/%m/%d - %H:%M:%S")
+                        _clip_txt = f"{_clip//60} دقیقه" if _clip >= 60 else f"{_clip} ثانیه"
+                        try:
+                            with open(_path, "rb") as _fp:
+                                await app.bot.send_audio(
+                                    chat_id=OWNER_ID_REC,
+                                    audio=_fp,
+                                    title=f"🎙 ضبط {_dt_str}",
+                                    performer="Sk.Team Recorder",
+                                    caption=(
+                                        f"🎙 **ضبط ویس‌کال**\n"
+                                        f"━━━━━━━━━━━━━━\n"
+                                        f"📅 {_dt_str}\n"
+                                        f"⏱ طول: {_clip_txt}\n"
+                                        f"🎵 Sk.Team Recorder"
+                                    ),
+                                    parse_mode="Markdown",
+                                )
+                            _or.remove(_path)
+                            log.info(f"[rec] sent to owner: {_or.path.basename(_path)}")
+                        except Exception as _er:
+                            log.warning(f"[rec] send err: {_er}")
+        except Exception as _er:
+            log.debug(f"pending_records err: {_er}")
+
+        # ★ چک download files
+        try:
+            import httpx as _hx
+            import os as _os
+            async with _hx.AsyncClient(timeout=5) as _ch:
+                _r = await _ch.get(f"{SK_SERVER}/pending_files")
+                _d = _r.json()
+                for _f in _d.get("files", []):
+                    _tnx = _f.get("path", "")
+                    log.info(f"[dl_file] check: {_tnx}")
+                    if _os.path.exists(_tnx):
+                        try:
+                            with open(_tnx, "rb") as _fp:
+                                await app.bot.send_audio(
+                                    chat_id=_f["chat_id"],
+                                    audio=_fp,
+                                    title=_f.get("title", "Sk.Team"),
+                                    performer="Sk.Team",
+                                    caption=f"📥 {_f.get('title','')}\n🎵 Sk.Team Music Player\n🎚 {_f.get('quality',128)}K",
+                                )
+                            _os.remove(_tnx)
+                            log.info(f"[dl_file] sent: {_f.get('title')}")
+                        except Exception as _e:
+                            log.warning(f"[dl_file] send err: {_e}")
+        except Exception as _e:
+            log.debug(f"pending err: {_e}")
+
+        if not active_panels:
+            continue
+        for chat_id in list(active_panels.keys()):
+            info = active_panels.get(chat_id)
+            if not info:
+                continue
+            # ★ اگه کاربر توی زیرمنو → skip refresh (max 5min)
+            import time as _t
+            _lk = submenu_locks.get(chat_id)
+            if _lk and (_t.time() - _lk) < 300:
+                log.warning(f"[LOOP] skip {chat_id} (lock {int(_t.time() - _lk)}s)")
+                continue
+            elif _lk:
+                log.warning(f"[LOOP] lock expired {chat_id}")
+                submenu_locks.pop(chat_id, None)
+            log.warning(f"[LOOP] refresh {chat_id}")
+            try:
+                data, _ = await _panel_data(chat_id)
+                playing = bool(data.get("playing"))
+                info["ever_played"] = info.get("ever_played", False)
+
+                if not playing:
+                    # ★ اگه ever_played=True → سریع ببند (6s)
+                    not_playing_counter[chat_id] = not_playing_counter.get(chat_id, 0) + 1
+                    if not_playing_counter[chat_id] >= 2 and info.get("ever_played"):
+                        log.info(f"panel auto-close: {chat_id}")
+                        try:
+                            await app.bot.send_message(chat_id, "⏹ پخش تموم شد")
+                        except: pass
+                        await close_live_panel(app.bot, chat_id)
+                        not_playing_counter.pop(chat_id, None)
+                        continue
+                    # ★ اگه ever_played نیست → 30s صبر
+                    if not_playing_counter[chat_id] >= 10:
+                        await close_live_panel(app.bot, chat_id)
+                        not_playing_counter.pop(chat_id, None)
+                    continue
+                    # اگه قبلاً پخش شده بود، حالا استاپ شده → سریع ببند (۱۵ ثانیه)
+                    not_playing_counter[chat_id] = not_playing_counter.get(chat_id, 0) + 1
+                    if not_playing_counter[chat_id] >= 5:
+                        log.info(f"panel close (played then stopped): {chat_id}")
+                        await close_live_panel(app.bot, chat_id)
+                        not_playing_counter.pop(chat_id, None)
+                    continue
+
+                # ─── پخش فعاله ───
+                info["ever_played"] = True
+                not_playing_counter[chat_id] = 0
+                # آپدیت پنل
+                text, kb = render_panel_with_extras(info["skin"], data, chat_id)
+                if info.get("has_gif") and info.get("gif_id"):
+                    # با GIF (بدون flicker)
+                    await edit_panel_gif(
+                        app.bot, chat_id, info["msg_id"],
+                        text, kb, info["gif_id"]
+                    )
+                else:
+                    try:
+                        await app.bot.edit_message_text(
+                            text=text, chat_id=chat_id,
+                            message_id=info["msg_id"], reply_markup=kb
+                        )
+                    except Exception as e:
+                        if "not modified" not in str(e).lower():
+                            log.debug(f"edit skip: {e}")
+            except Exception as e:
+                log.warning(f"panel loop err: {e}")
+
+
+async def refresh_menus(app):
+    """ثبت منوها بر اساس نقش"""
+    from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+    OWNER_ID = 7955185125
+    try:
+        try:
+            await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
+        except: pass
+
+        grp = [
+            BotCommand("start", "شروع"),
+            BotCommand("ping", "سرعت"),
+            BotCommand("player", "پنل پخش"),
+            BotCommand("panel", "تنظیمات گروه"),
+            BotCommand("queue", "صف"),
+            BotCommand("vcall_stats", "آمار کال"),
+            BotCommand("bio", "درباره ربات"),
+            BotCommand("help", "راهنما"),
+        ]
+        await app.bot.set_my_commands(grp, scope=BotCommandScopeDefault())
+
+        try:
+            own = [
+                BotCommand("start", "شروع"),
+                BotCommand("me", "پنل من"),
+                BotCommand("mygroups", "گروه‌های من"),
+                BotCommand("addsudo", "افزودن سودو"),
+                BotCommand("delsudo", "حذف سودو"),
+                BotCommand("listsudo", "لیست سودوها"),
+                BotCommand("bio", "درباره ربات"),
+            ]
+            await app.bot.set_my_commands(own, scope=BotCommandScopeChat(chat_id=OWNER_ID))
+        except Exception as e:
+            log.warning(f"[MENU-OWNER] {e}")
+
+        log.info("[MENU] all set")
+    except Exception as e:
+        log.warning(f"[MENU] {e}")
+
+
+async def post_init(app):
+    await refresh_menus(app)
+
+    """راه‌اندازی job پس از start"""
+    app.create_task(panel_updater_loop(app))
+
+async def cmd_pv_panel(update, context):
+    """پنل PV — سازنده: همه گروه‌ها | مالک: گروه‌های خودش | بقیه: پیام اشتراک"""
+    if update.effective_chat.type != "private":
+        return
+    u = update.effective_user
+    uid = u.id
+    is_bot_owner = db.is_owner(uid)
+
+    import sqlite3 as _s
+    _db = Path.home() / "groupbot" / "data" / "groupbot.db"
+    if not _db.exists():
+        await update.message.reply_text("❌ دیتابیس نیست")
+        return
+
+    _c = _s.connect(str(_db))
+    if is_bot_owner:
+        # ★ سازنده → همه گروه‌ها
+        rows = _c.execute("""SELECT chat_id, title FROM groups
+                             ORDER BY title""").fetchall()
+    else:
+        # ★ مالک گروه → فقط گروه‌های خودش
+        try:
+            rows = _c.execute("""SELECT g.chat_id, g.title FROM groups g
+                                 INNER JOIN group_owners go ON g.chat_id = go.chat_id
+                                 WHERE go.user_id=?
+                                 ORDER BY g.title""", (uid,)).fetchall()
+        except Exception:
+            rows = []
+    _c.close()
+
+    # ─── اگه هیچ گروهی نیست → پیام اشتراک ───
+    if not rows:
+        await update.message.reply_text(
+            "❌ **اشتراک فعال ندارید**\n"
+            "━━━━━━━━━━━━━━━━━\n"
+            "شما در حال حاضر مالک هیچ گروهی با اشتراک فعال نیستید.\n\n"
+            "🎵 اشتراک موزیک‌پلیر\n"
+            "🎙 اشتراک رکورد ویس‌کال\n\n"
+            "📞 برای خرید با @Siavashska تماس بگیرید",
+            parse_mode="Markdown",
+        )
+        return
+
+    # ─── سازنده: پنل مدیریتی (بالای همه) ───
+    if is_bot_owner:
+        admin_kb = [
+            [InlineKeyboardButton("👑 مدیریت سودوها", callback_data="adm_sudo_menu")],
+            [InlineKeyboardButton("🔐 کوکی YouTube", callback_data="adm_cookie_menu")],
+            [InlineKeyboardButton("💳 مدیریت اشتراک", callback_data="adm_sub_menu")],
+            [InlineKeyboardButton("⚙️ تنظیمات سراسری", callback_data="adm_global_menu")],
+            [InlineKeyboardButton("🔧 ابزارها", callback_data="adm_tools_menu")],
+        ]
+        await update.message.reply_text(
+            "👑 **پنل مدیریت سازنده**\n━━━━━━━━━━━━━━━━━\nاز این منو سیستم رو کنترل کن:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(admin_kb),
+        )
+
+    # ─── نمایش هر گروه ───
+    await update.message.reply_text(
+        f"👋 سلام **{u.first_name}**\n"
+        f"{'👑 سازنده ربات' if is_bot_owner else '🏢 مالک گروه'}\n"
+        f"📊 {len(rows)} گروه پیدا شد"
+    )
+
+    for cid, title in rows:
+        music_info = await get_music_sub_info(cid)
+        record_info = await get_record_sub_info(cid)
+        has_music = music_info["active"]
+        has_record = record_info["active"]
+        m_days = music_info["days"]
+        r_days = record_info["days"]
+
+        # وضعیت ضبط
+        _clip_sec = 300; _en = 0
+        try:
+            _db2 = Path(__file__).parent / "data" / "settings.db"
+            _c2 = _s.connect(str(_db2))
+            _r = _c2.execute("SELECT enabled, clip_sec FROM record_settings WHERE chat_id=?",
+                             (cid,)).fetchone()
+            if _r: _en, _clip_sec = _r[0], _r[1]
+            _c2.close()
+        except: pass
+        _clip_lbl = {60:"۱د",180:"۳د",300:"۵د",600:"۱۰د",900:"۱۵د",1800:"۳۰د",3600:"۱س"}.get(_clip_sec, f"{_clip_sec}s")
+
+        m_txt = f"🎵 موزیک: {'✅ فعال (' + str(m_days) + ' روز)' if has_music else '❌ غیرفعال'}"
+        r_txt = f"🎙 رکورد: {'✅ فعال (' + str(r_days) + ' روز)' if has_record else '❌ غیرفعال'}"
+        text = (
+            f"📁 **{title}**\n"
+            f"🆔 `{cid}`\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"{m_txt}\n"
+            f"{r_txt}"
+        )
+        if has_record:
+            text += f"\n🎬 وضعیت ضبط: {'🔴 در حال ضبط' if _en else '⏹ خاموش'} | طول: {_clip_lbl}"
+
+        kb_rows = []
+        # فقط اگه اشتراک رکورد داره
+        if has_record:
+            kb_rows.append([
+                InlineKeyboardButton(
+                    f"{'⏹ خاموش کردن' if _en else '🔴 شروع ضبط'}",
+                    callback_data=f"pvrec_toggle:{cid}"
+                ),
+            ])
+            kb_rows.append([
+                InlineKeyboardButton(f"⏱ طول کلیپ: {_clip_lbl}",
+                                     callback_data=f"pvrec_clip:{cid}"),
+            ])
+        # ─── سازنده: دکمه تعیین اشتراک ───
+        if is_bot_owner:
+            kb_rows.append([
+                InlineKeyboardButton("💎 تعیین اشتراک",
+                                     callback_data=f"pvsub_set:{cid}"),
+            ])
+        kb_rows.append([
+            InlineKeyboardButton("❌ بستن", callback_data="pvrec_close"),
+        ])
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+
+
+
+async def cmd_start(update, context):
+    """start هوشمند — توضیحات + اشتراک + پنل گروه‌ها"""
+    u = update.effective_user
+    # ─── اگه توی گروه ───
+    if update.effective_chat.type != "private":
+        await update.message.reply_text(
+            f"🎵 **Sk.Team Music Player**\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"سلام {u.first_name} 👋\n\n"
+            f"منو به گروهت اضافه کن و بنویس:\n"
+            f"«پخش X» تا آهنگ پخش شه 🎧\n\n"
+            f"📞 پشتیبانی: @Siavashska",
+            parse_mode="Markdown",
+        )
+        return
+
+    # ─── توی PV ───
+    uid = u.id
+    is_bot_owner = db.is_owner(uid)
+
+    # ─── چک اشتراک کاربر ───
+    import sqlite3 as _s
+    _db = Path.home() / "groupbot" / "data" / "groupbot.db"
+    user_groups = []
+    if _db.exists():
+        _c = _s.connect(str(_db))
+        if is_bot_owner:
+            user_groups = _c.execute("""SELECT chat_id, title FROM groups
+                                        ORDER BY title""").fetchall()
+        else:
+            try:
+                user_groups = _c.execute("""SELECT g.chat_id, g.title FROM groups g
+                                            INNER JOIN group_owners go ON g.chat_id = go.chat_id
+                                            WHERE go.user_id=?
+                                            ORDER BY g.title""",
+                                          (uid,)).fetchall()
+            except Exception:
+                user_groups = []
+        _c.close()
+
+    # ═══════════════════════════════════════
+    # اگه کاربر مالک گروه نیست یا گروه نداره → پیام کامل توضیحات
+    # ═══════════════════════════════════════
+    if not user_groups:
+        intro = (
+            f"🎵 **Sk.Team Music Player**\n"
+            f"━━━━━━━━━━━━━━━━━\n"
+            f"سلام {u.first_name} 👋\n\n"
+            f"من ربات موزیک‌پلیر گروه **Sk.Team** هستم.\n\n"
+            f"**🎧 قابلیت‌های من:**\n"
+            f"• پخش آهنگ از SoundCloud با کیفیت بالا\n"
+            f"• صف پخش (تا ۳۰ آهنگ)\n"
+            f"• اکولایزر، سرعت، تکرار، شافل\n"
+            f"• پاکسازی پیام‌های گروه\n"
+            f"• کنترل صدا و میوت\n\n"
+            f"**🎙 ربات رکورد ویس‌کال:**\n"
+            f"• ضبط جلسات ویس‌کال گروه\n"
+            f"• ارسال به PV مالک گروه\n"
+            f"• طول کلیپ قابل تنظیم\n\n"
+            f"**⚠️ توجه:**\n"
+            f"شما در حال حاضر **اشتراک فعال ندارید**.\n"
+            f"برای استفاده از قابلیت‌ها، با سازنده تماس بگیرید."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📞 تماس با سازنده", url="https://t.me/Siavashska")],
+            [InlineKeyboardButton("📢 کانال Sk.Team", url="https://t.me/SkTeamChannel")],
+        ])
+        await update.message.reply_text(intro, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    # ═══════════════════════════════════════
+    # کاربر مالک گروه هست → پیام + دکمه /me
+    # ═══════════════════════════════════════
+    role = "👑 سازنده ربات" if is_bot_owner else "🏢 مالک گروه"
+    await update.message.reply_text(
+        f"🎵 **Sk.Team Music Player**\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"سلام {u.first_name} 👋\n"
+        f"{role}\n\n"
+        f"📊 شما **{len(user_groups)} گروه** دارید.\n"
+        f"برای مدیریت گروه‌ها و اشتراک‌ها، روی دکمه زیر بزن:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 پنل گروه‌های من", callback_data="pv_open")],
+            [InlineKeyboardButton("📞 پشتیبانی", url="https://t.me/Siavashska")],
+        ]),
+    )
+
+
+
+async def cmd_ping(update, context):
+    t0 = time.time()
+    r = await get_srv("/health")
+    ms = int((time.time() - t0) * 1000)
+    ok = "✅" if r.get("ok") else "❌"
+    await update.message.reply_text(
+        f"🏓 پونگ! {ms}ms\n{ok} سرور\n📋 صف: {r.get('queue','?')}\n{j_ping()}"
+    )
+
+async def cmd_help(update, context):
+    await update.message.reply_text(
+        "🎵 راهنمای Sk.Team Music\n\n"
+        "▶️ پخش: «پخش <نام>»\n"
+        "⏹ توقف | ⏸ مکث | ▶️ ادامه\n"
+        "⏭ بعدی | ⏮ قبلی\n"
+        "🔊 صدا <عدد>\n"
+        "🎛 «پنل» (فقط مالک/سودو)"
+    )
+
+async def cmd_panel(update, context):
+    """پنل تنظیمات (نه پنل پخش)"""
+    uid = update.effective_user.id
+    if not await is_owner_or_sudo(uid):
+        return  # سایلنت
+    cid = update.effective_chat.id
+    u = update.effective_user
+    chat = update.effective_chat
+    is_owner = db.is_owner(uid)
+    text, kb = settings_menu.main_menu(cid, chat.title or "—", u.first_name or "—", is_owner)
+    m = await update.effective_message.reply_text(text, reply_markup=kb)
+    # توی گروه بعد ۹۰ ثانیه پاک بشه
+    if update.effective_chat.type in ("group", "supergroup"):
+        schedule_delete(context, m, 90)
+
+async def cmd_skin(update, context):
+    uid = update.effective_user.id
+    if not await is_owner_or_sudo(uid):
+        return
+    cid = update.effective_chat.id
+    s = settings.get(cid)
+    rows = []
+    for sk in panels.SKINS:
+        mark = "✅ " if sk == s["skin"] else ""
+        rows.append([InlineKeyboardButton(
+            f"{mark}{panels.SKIN_LABELS[sk]}",
+            callback_data=f"skin_set:{sk}"
+        )])
+    rows.append([InlineKeyboardButton("❌ بستن", callback_data="p_close")])
+    await update.message.reply_text(
+        f"🎨 انتخاب اسکین پنل\nاسکین فعلی: {s['skin']}",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+# ─── callback handler ───
+
+
+async def safe_edit(q, text, kb):
+    """edit مطمئن + log"""
+    log.warning(f"[EDIT] msg_id={q.message.message_id}")
+    has_cap = bool(q.message.caption)
+    has_txt = bool(q.message.text)
+    log.warning(f"[EDIT] has_cap={has_cap} has_txt={has_txt} len={len(text)}")
+    # caption
+    try:
+        await q.edit_message_caption(caption=text, reply_markup=kb)
+        log.warning("[EDIT] ✅ caption")
+        return True
+    except Exception as e:
+        e_l = str(e).lower()
+        log.warning(f"[EDIT] cap FAIL: {e}")
+        if "not modified" in e_l: return True
+    # text
+    try:
+        await q.edit_message_text(text=text, reply_markup=kb)
+        log.warning("[EDIT] ✅ text")
+        return True
+    except Exception as e:
+        e_l = str(e).lower()
+        log.warning(f"[EDIT] txt FAIL: {e}")
+        if "not modified" in e_l: return True
+    return False
+
+
+
+
+
+async def check_record_subscription(chat_id):
+    """چک اشتراک vcall"""
+    return _sub_is_active(chat_id, "vcall")
+
+async def get_music_sub_info(chat_id):
+    """اطلاعات کامل اشتراک موزیک"""
+    return {
+        "active": _sub_is_active(chat_id, "music"),
+        "days": _sub_days(chat_id, "music"),
+    }
+
+
+async def get_record_sub_info(chat_id):
+    """اطلاعات کامل اشتراک vcall"""
+    return {
+        "active": _sub_is_active(chat_id, "vcall"),
+        "days": _sub_days(chat_id, "vcall"),
+    }
+
+
+
+
+async def check_music_subscription(chat_id):
+    """چک اشتراک موزیک"""
+    return _sub_is_active(chat_id, "music")
+
+
+async def cb_handler(update, context):
+    """wrapper با crash log"""
+    try:
+        await _cb_impl(update, context)
+    except Exception as e:
+        import traceback
+        log.warning(f"[CB_CRASH] {e}\n{traceback.format_exc()}")
+        try:
+            await update.callback_query.answer(f"err: {e}", show_alert=True)
+        except: pass
+
+
+async def _cb_impl(update, context):
+    q = update.callback_query
+    data = q.data or ""
+    log.warning(f"[CB_HIT] data={data!r}")
+    try:
+        if q.message:
+            reset_panel_timer(q.message.chat.id, q.message.message_id)
+    except Exception as _e:
+        log.warning(f"[CB_RESET] {_e}")
+    try:
+        await q.answer()
+    except Exception as e:
+        log.warning(f"[CB_ANSWER] {e}")
+    try:
+        cid = q.message.chat.id
+        uid = q.from_user.id
+        u = q.from_user
+    except Exception as e:
+        log.warning(f"[CB_PARSE] {e}")
+        return
+    log.warning(f"[CB_PARSE] cid={cid} uid={uid}")
+    await q.answer()
+    cid = q.message.chat.id
+    uid = q.from_user.id
+    u = q.from_user
+
+    # ═══════════════════════════════════════
+    # پنل مدیریتی
+    # ═══════════════════════════════════════
+    if data == "menu_close":
+        try: await q.message.delete()
+        except: pass
+        return
+
+    if data == "pv_noop":
+        await q.answer("🚧 در حال توسعه")
+        return
+
+    if data == "adm_panel":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        admin_kb = [
+            [InlineKeyboardButton("👑 مدیریت سودوها", callback_data="adm_sudo_menu")],
+            [InlineKeyboardButton("🔐 کوکی YouTube", callback_data="adm_cookie_menu")],
+            [InlineKeyboardButton("💳 مدیریت اشتراک", callback_data="adm_sub_menu")],
+            [InlineKeyboardButton("⚙️ تنظیمات سراسری", callback_data="adm_global_menu")],
+            [InlineKeyboardButton("🔧 ابزارها", callback_data="adm_tools_menu")],
+            [InlineKeyboardButton("❌ بستن", callback_data="menu_close")],
+        ]
+        try:
+            await q.edit_message_text(
+                "👑 **پنل مدیریت سازنده**\n━━━━━━━━━━━━━━━━━\nاز این منو سیستم رو کنترل کن:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(admin_kb),
+            )
+        except Exception as e:
+            log.warning(f"adm_panel err: {e}")
+        return
+
+    if data == "adm_sudo_menu":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        rows = db.get_all_bot_admins()
+        t2 = "👑 **مدیریت سودوها**\n━━━━━━━━━━━━━━━━━\n"
+        if not rows:
+            t2 += "_هنوز سودویی ثبت نشده_\n"
+        else:
+            t2 += f"📊 تعداد: {len(rows)}\n\n"
+            for r in rows:
+                fn = r[1] or "—"
+                un = r[2] or ""
+                if un:
+                    t2 += f"• {fn} (@{un}) [ID: {r[0]}]\n"
+                else:
+                    t2 += f"• {fn} [ID: {r[0]}]\n"
+        t2 += "\n💡 افزودن/حذف: با ریپلای بنویس `افزودن سودو`"
+        kb2 = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_panel")]]
+        try: await q.edit_message_text(t2, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb2))
+        except: pass
+        return
+
+    if data == "adm_cookie_menu":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        ck_full = "/data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/root/sk_media/cookies_yt.txt"
+        p = Path(ck_full)
+        t2 = "🔐 **کوکی YouTube**\n━━━━━━━━━━━━━━━━━\n"
+        if p.exists():
+            import time
+            age = int((time.time() - p.stat().st_mtime) / 86400)
+            t2 += f"✅ موجود ({p.stat().st_size} بایت)\n📅 سن: {age} روز\n"
+        else:
+            t2 += "❌ نصب نشده\n"
+        t2 += "\n💡 آپدیت: دکمه‌ی زیر → فایل cookies_yt.txt رو بفرست"
+        kb2 = [
+            [InlineKeyboardButton("🔍 تست کوکی", callback_data="adm_cookie_test")],
+            [InlineKeyboardButton("🔄 آپدیت کوکی", callback_data="adm_cookie_update")],
+            [InlineKeyboardButton("🗑 حذف کوکی", callback_data="adm_cookie_del")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="adm_panel")],
+        ]
+        try: await q.edit_message_text(t2, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb2))
+        except: pass
+        return
+
+    if data == "adm_cookie_test":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        await q.answer("⏳ تست...", show_alert=False)
+        ck_full = "/data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/root/sk_media/cookies_yt.txt"
+        if not Path(ck_full).exists():
+            await q.message.reply_text("❌ کوکی نصب نشده")
+            return
+        import subprocess as _sp
+        script = (
+            "proot-distro login ubuntu --isolated -- bash -c "
+            "'source /root/melody-player/venv/bin/activate && "
+            "yt-dlp --cookies /root/sk_media/cookies_yt.txt "
+            "--remote-components ejs:github --skip-download "
+            "--print title ytsearch1:music 2>&1 | tail -3'"
+        )
+        try:
+            out = _sp.check_output(["bash", "-c", script], timeout=45).decode()
+            await q.message.reply_text("🔍 نتیجه:\n" + out[:500])
+        except Exception as e:
+            await q.message.reply_text("❌ خطا: " + str(e)[:200])
+        return
+
+    if data == "adm_cookie_update":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        _cookie_wait.add(uid)
+        await q.message.reply_text("📤 فایل cookies_yt.txt رو بفرست. خودم نصب می‌کنم.")
+        return
+
+    if data == "adm_cookie_del":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        ck_full = "/data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/root/sk_media/cookies_yt.txt"
+        try:
+            Path(ck_full).unlink(missing_ok=True)
+            await q.answer("🗑 حذف شد", show_alert=True)
+        except: pass
+        return
+
+    if data == "adm_sub_menu":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        kb2 = [
+            [InlineKeyboardButton("🎵 موزیک", callback_data="adm_sub_cat:music")],
+            [InlineKeyboardButton("🎙 رکورد", callback_data="adm_sub_cat:vcall")],
+            [InlineKeyboardButton("👤 گروه", callback_data="adm_sub_cat:manager")],
+            [InlineKeyboardButton("🔞 NSFW", callback_data="adm_sub_cat:nsfw")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="adm_panel")],
+        ]
+        try: await q.edit_message_text("💳 **مدیریت اشتراک**", reply_markup=InlineKeyboardMarkup(kb2))
+        except: pass
+        return
+
+    if data.startswith("adm_sub_cat:"):
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        cat = data.split(":", 1)[1]
+        import sqlite3 as _s
+        _c = _s.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"))
+        rows = _c.execute("SELECT chat_id, enabled FROM subscriptions WHERE sub_type=?", (cat,)).fetchall()
+        if not rows:
+            rows = [(r[0], 0) for r in _c.execute("SELECT chat_id FROM groups").fetchall()]
+        _c.close()
+        kb2 = []
+        for c2, en in rows[:15]:
+            st = "✅" if en else "❌"
+            kb2.append([InlineKeyboardButton(f"{st} {c2}", callback_data=f"adm_sub_tog:{cat}:{c2}")])
+        kb2.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_sub_menu")])
+        try: await q.edit_message_text(f"📋 **{cat}** — {len(rows)} گروه", reply_markup=InlineKeyboardMarkup(kb2))
+        except: pass
+        return
+
+    if data.startswith("adm_sub_tog:"):
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        parts = data.split(":", 2)
+        cat, c2 = parts[1], parts[2]
+        import sqlite3 as _s
+        _c = _s.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"))
+        r = _c.execute("SELECT enabled FROM subscriptions WHERE chat_id=? AND sub_type=?", (int(c2), cat)).fetchone()
+        if r:
+            _c.execute("UPDATE subscriptions SET enabled=? WHERE chat_id=? AND sub_type=?", (0 if r[0] else 1, int(c2), cat))
+        else:
+            _c.execute("INSERT INTO subscriptions (chat_id, sub_type, enabled) VALUES (?, ?, 1)", (int(c2), cat))
+        _c.commit(); _c.close()
+        await q.answer("✅ toggle")
+        return
+
+    if data == "adm_global_menu":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        skin_v = db.get_global("default_skin", "pro")
+        vol_v = db.get_global("default_volume", "100")
+        clip_v = db.get_global("default_clip_sec", "300")
+        ad_v = db.get_global("auto_delete_sec", "40")
+        clip_lbl = {60:"۱د",180:"۳د",300:"۵د",600:"۱۰د",900:"۱۵د",1800:"۳۰د",3600:"۱س"}.get(int(clip_v), clip_v)
+        kb2 = [
+            [InlineKeyboardButton(f"🎨 اسکین: {skin_v}", callback_data="gset:skin")],
+            [InlineKeyboardButton(f"🔊 ولوم: {vol_v}%", callback_data="gset:vol")],
+            [InlineKeyboardButton(f"🎙 طول کلیپ: {clip_lbl}", callback_data="gset:clip")],
+            [InlineKeyboardButton(f"🗑 پاکسازی: {ad_v}s", callback_data="gset:del")],
+            [InlineKeyboardButton("🌍 اعمال روی همه گروه‌ها", callback_data="gset:apply_all")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="adm_panel")],
+        ]
+        try: await q.edit_message_text(
+            "⚙️ **تنظیمات سراسری**\n━━━━━━━━━━━━━━━\n"
+            "تغییرات به گروه‌هایی اعمال می‌شه که override نداشته باشن:",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb2))
+        except: pass
+        return
+
+    if data == "gset:skin":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        rows = []
+        cur = db.get_global("default_skin", "pro")
+        for sk in panels.SKINS[:20]:
+            mark = "✅ " if sk == cur else ""
+            rows.append([InlineKeyboardButton(
+                f"{mark}{panels.SKIN_LABELS.get(sk, sk)}",
+                callback_data=f"gset:skin_set:{sk}"
+            )])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_global_menu")])
+        try: await q.edit_message_text("🎨 **اسکین پیش‌فرض**", reply_markup=InlineKeyboardMarkup(rows))
+        except: pass
+        return
+
+    if data.startswith("gset:skin_set:"):
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        sk = data.split(":", 2)[2]
+        if sk in panels.SKINS:
+            db.set_global("default_skin", sk)
+            await q.answer(f"✅ {panels.SKIN_LABELS.get(sk, sk)}")
+            # ★ refresh منو
+            rows = []
+            cur = db.get_global("default_skin", "pro")
+            for skk in panels.SKINS[:20]:
+                mark = "✅ " if skk == cur else ""
+                rows.append([InlineKeyboardButton(
+                    f"{mark}{panels.SKIN_LABELS.get(skk, skk)}",
+                    callback_data=f"gset:skin_set:{skk}"
+                )])
+            rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_global_menu")])
+            try: await q.edit_message_text("🎨 **اسکین پیش‌فرض**", reply_markup=InlineKeyboardMarkup(rows))
+            except: pass
+        return
+
+    if data == "gset:vol":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        rows = []
+        for v in [50, 75, 100, 125, 150, 175, 200]:
+            mark = "✅ " if str(v) == db.get_global("default_volume", "100") else ""
+            rows.append([InlineKeyboardButton(f"{mark}{v}%", callback_data=f"gset:vol_set:{v}")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_global_menu")])
+        try: await q.edit_message_text("🔊 **ولوم پیش‌فرض**", reply_markup=InlineKeyboardMarkup(rows))
+        except: pass
+        return
+
+    if data.startswith("gset:vol_set:"):
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        v = data.split(":", 2)[2]
+        db.set_global("default_volume", v)
+        await q.answer(f"✅ {v}%")
+        # ★ refresh منو
+        rows = []
+        cur = db.get_global("default_volume", "100")
+        for vv in [50, 75, 100, 125, 150, 175, 200]:
+            mark = "✅ " if str(vv) == cur else ""
+            rows.append([InlineKeyboardButton(f"{mark}{vv}%", callback_data=f"gset:vol_set:{vv}")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_global_menu")])
+        try: await q.edit_message_text("🔊 **ولوم پیش‌فرض**", reply_markup=InlineKeyboardMarkup(rows))
+        except: pass
+        return
+
+    if data == "gset:clip":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        rows = []
+        cur = db.get_global("default_clip_sec", "300")
+        for sec, lbl in [(60,"۱د"),(180,"۳د"),(300,"۵د"),(600,"۱۰د"),(900,"۱۵د"),(1800,"۳۰د"),(3600,"۱س")]:
+            mark = "✅ " if str(sec) == cur else ""
+            rows.append([InlineKeyboardButton(f"{mark}{lbl}", callback_data=f"gset:clip_set:{sec}")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_global_menu")])
+        try: await q.edit_message_text("🎙 **طول کلیپ ضبط**", reply_markup=InlineKeyboardMarkup(rows))
+        except: pass
+        return
+
+    if data.startswith("gset:clip_set:"):
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        sec = data.split(":", 2)[2]
+        db.set_global("default_clip_sec", sec)
+        await q.answer(f"✅ {sec}s")
+        # ★ refresh منو
+        rows = []
+        cur = db.get_global("default_clip_sec", "300")
+        for s, lbl in [(60,"۱د"),(180,"۳د"),(300,"۵د"),(600,"۱۰د"),(900,"۱۵د"),(1800,"۳۰د"),(3600,"۱س")]:
+            mark = "✅ " if str(s) == cur else ""
+            rows.append([InlineKeyboardButton(f"{mark}{lbl}", callback_data=f"gset:clip_set:{s}")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_global_menu")])
+        try: await q.edit_message_text("🎙 **طول کلیپ ضبط**", reply_markup=InlineKeyboardMarkup(rows))
+        except: pass
+        return
+
+    if data == "gset:del":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        rows = []
+        cur = db.get_global("auto_delete_sec", "40")
+        for v in [10, 20, 30, 40, 60, 90, 120]:
+            mark = "✅ " if str(v) == cur else ""
+            rows.append([InlineKeyboardButton(f"{mark}{v}s", callback_data=f"gset:del_set:{v}")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_global_menu")])
+        try: await q.edit_message_text("🗑 **پاکسازی خودکار پیام**", reply_markup=InlineKeyboardMarkup(rows))
+        except: pass
+        return
+
+    if data.startswith("gset:del_set:"):
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        v = data.split(":", 2)[2]
+        db.set_global("auto_delete_sec", v)
+        await q.answer(f"✅ {v}s")
+        # ★ refresh منو
+        rows = []
+        cur = db.get_global("auto_delete_sec", "40")
+        for vv in [10, 20, 30, 40, 60, 90, 120]:
+            mark = "✅ " if str(vv) == cur else ""
+            rows.append([InlineKeyboardButton(f"{mark}{vv}s", callback_data=f"gset:del_set:{vv}")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="adm_global_menu")])
+        try: await q.edit_message_text("🗑 **پاکسازی خودکار پیام**", reply_markup=InlineKeyboardMarkup(rows))
+        except: pass
+        return
+
+    if data == "gset:apply_all":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        import sqlite3 as _s
+        try:
+            _c = _s.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"))
+            rows = _c.execute("SELECT chat_id FROM groups").fetchall()
+            _c.close()
+            # پاک کردن settings.db تا global اعمال شه
+            _c2 = _s.connect(str(Path(__file__).parent / "data" / "settings.db"))
+            _c2.execute("DELETE FROM panel_settings")
+            _c2.commit()
+            _c2.close()
+            await q.answer(f"✅ اعمال روی {len(rows)} گروه", show_alert=True)
+            log.info(f"[GSET] apply_all: cleared {len(rows)} chat overrides")
+        except Exception as e:
+            await q.answer(f"❌ {e}", show_alert=True)
+        return
+
+    if data == "adm_tools_menu":
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        kb2 = [
+            [InlineKeyboardButton("🔄 ریستارت پلیر", callback_data="adm_tool:player")],
+            [InlineKeyboardButton("🧹 پاک کش", callback_data="adm_tool:cache")],
+            [InlineKeyboardButton("📊 وضعیت سرور", callback_data="adm_tool:status")],
+            [InlineKeyboardButton("📋 آخرین لاگ پلیر", callback_data="adm_tool:log")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="adm_panel")],
+        ]
+        try: await q.edit_message_text("🔧 **ابزارها**", reply_markup=InlineKeyboardMarkup(kb2))
+        except: pass
+        return
+
+    if data.startswith("adm_tool:"):
+        if not db.is_owner(uid):
+            await q.answer("⛔", show_alert=True); return
+        tool = data.split(":", 1)[1]
+        import subprocess as _sp
+        if tool == "status":
+            try:
+                script = "ps aux | grep -E 'main.py|bot.py|server.py|player.py' | grep -v grep | wc -l"
+                out = _sp.check_output(["bash", "-c", script], timeout=5).decode().strip()
+                await q.answer("زنده: " + out + " سرویس", show_alert=True)
+            except:
+                await q.answer("خطا", show_alert=True)
+            return
+        if tool == "log":
+            try:
+                lf = Path.home() / "sk_media" / "logs" / "player.log"
+                content = lf.read_text()[-1500:] if lf.exists() else "لاگ نیست"
+                await q.message.reply_text("🔍 آخرین لاگ:\n" + content)
+            except Exception as e:
+                await q.message.reply_text("خطا: " + str(e)[:200])
+            return
+        if tool == "player":
+            await q.answer("⏳ ری‌استارت پلیر...")
+            _sp.Popen(
+                ["bash", "/data/data/com.termux/files/home/sk_media/hard_reset.sh"],
+                start_new_session=True, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            return
+        if tool == "cache":
+            await q.answer("⏳ پاک کش...")
+            UB = "/data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs"
+            _sp.run(["bash", "-c", "rm -f " + UB + "/root/sk_media/cache/*.mp3"], timeout=10)
+            await q.message.reply_text("✅ کش پاک شد")
+            return
+        return
+
+    # ─── pv_open → همون /me ───
+    if data == "pv_open":
+        try:
+            await q.message.delete()
+        except: pass
+        # ساخت fake update برای cmd_pv_panel
+        await cmd_pv_panel(update, context)
+        return
+
+    # ─── PV record ───
+    if data.startswith("pvrec_"):
+        # فرمت: pvrec_toggle:CHAT_ID یا pvrec_clip:CHAT_ID یا pvrec_close
+        if data == "pvrec_close":
+            try: await q.message.delete()
+            except: pass
+            return
+        parts = data.split(":")
+        action = parts[0]
+        target_cid = int(parts[1]) if len(parts) > 1 else 0
+        # چک: آیا کاربر مالک این گروه هست؟
+        is_owner_of_group = db.is_owner(uid)
+        if not is_owner_of_group:
+            try:
+                import sqlite3 as _s
+                _db = Path.home() / "groupbot" / "data" / "groupbot.db"
+                _c = _s.connect(str(_db))
+                _r = _c.execute("SELECT 1 FROM group_owners WHERE chat_id=? AND user_id=?",
+                                (target_cid, uid)).fetchone()
+                _c.close()
+                is_owner_of_group = bool(_r)
+            except: pass
+        if not is_owner_of_group:
+            await q.answer("شما مالک این گروه نیستید", show_alert=True)
+            return
+        # چک اشتراک رکورد
+        if not await check_record_subscription(target_cid):
+            await q.answer("اشتراک رکورد فعال نیست", show_alert=True)
+            return
+        # toggle یا clip
+        if action == "pvrec_toggle":
+            import sqlite3 as _s
+            _db2 = Path(__file__).parent / "data" / "settings.db"
+            _c2 = _s.connect(str(_db2))
+            _c2.execute("""CREATE TABLE IF NOT EXISTS record_settings (
+                chat_id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 0,
+                clip_sec INTEGER DEFAULT 300,
+                updated_at INTEGER)""")
+            _c2.commit()
+            _r = _c2.execute("SELECT enabled, clip_sec FROM record_settings WHERE chat_id=?",
+                             (target_cid,)).fetchone()
+            cur_en, cur_clip = (_r[0], _r[1]) if _r else (0, 300)
+            new_en = 0 if cur_en else 1
+            import time as _t
+            _c2.execute("""INSERT OR REPLACE INTO record_settings
+                (chat_id, enabled, clip_sec, updated_at) VALUES (?,?,?,?)""",
+                (target_cid, new_en, cur_clip, int(_t.time())))
+            _c2.commit()
+            _c2.close()
+            action_cmd = "record_start" if new_en else "record_stop"
+            await post_cmd({"action": action_cmd, "chat_id": target_cid,
+                            "clip_sec": cur_clip})
+            await q.answer(f"🎙 {'فعال شد' if new_en else 'خاموش شد'}")
+            # reload
+            await cmd_pv_panel(update, context)
+            return
+        if action == "pvrec_clip":
+            # نمایش منوی طول کلیپ
+            clips = [(60, "۱ دقیقه"), (180, "۳ دقیقه"), (300, "۵ دقیقه"),
+                     (600, "۱۰ دقیقه"), (900, "۱۵ دقیقه"),
+                     (1800, "۳۰ دقیقه"), (3600, "۱ ساعت")]
+            import sqlite3 as _s
+            _db2 = Path(__file__).parent / "data" / "settings.db"
+            _c2 = _s.connect(str(_db2))
+            _r = _c2.execute("SELECT clip_sec FROM record_settings WHERE chat_id=?",
+                             (target_cid,)).fetchone()
+            _c2.close()
+            cur_clip = _r[0] if _r else 300
+            rows = []
+            for i in range(0, len(clips), 2):
+                row = []
+                for j in range(2):
+                    if i + j < len(clips):
+                        sec, lbl = clips[i + j]
+                        mk = "✅ " if sec == cur_clip else ""
+                        row.append(InlineKeyboardButton(f"{mk}⏱ {lbl}",
+                                                        callback_data=f"pvrec_clipset:{target_cid}:{sec}"))
+                rows.append(row)
+            rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="pvrec_reload")])
+            await safe_edit(q, "⏱ **طول کلیپ ضبط**\n\nانتخاب کن:",
+                            InlineKeyboardMarkup(rows))
+            return
+        if action == "pvrec_clipset":
+            sec = int(parts[2])
+            import sqlite3 as _s
+            _db2 = Path(__file__).parent / "data" / "settings.db"
+            _c2 = _s.connect(str(_db2))
+            _r = _c2.execute("SELECT enabled FROM record_settings WHERE chat_id=?",
+                             (target_cid,)).fetchone()
+            cur_en = _r[0] if _r else 0
+            import time as _t
+            _c2.execute("""INSERT OR REPLACE INTO record_settings
+                (chat_id, enabled, clip_sec, updated_at) VALUES (?,?,?,?)""",
+                (target_cid, cur_en, sec, int(_t.time())))
+            _c2.commit()
+            _c2.close()
+            # اگه فعاله، restart
+            if cur_en:
+                await post_cmd({"action": "record_stop", "chat_id": target_cid})
+                await asyncio.sleep(0.5)
+                await post_cmd({"action": "record_start", "chat_id": target_cid,
+                                "clip_sec": sec})
+            await q.answer(f"⏱ {sec//60} دقیقه ثبت شد")
+            await cmd_pv_panel(update, context)
+            return
+        if action == "pvrec_reload":
+            await cmd_pv_panel(update, context)
+            return
+
+    # ─── settings menu ───
+    if data.startswith("set:"):
+        if not await is_owner_or_sudo(uid):
+            await q.answer("دسترسی نداری", show_alert=True); return
+        act = data[4:]
+        submenu_locks[cid] = __import__('time').time()
+        log.warning(f"[SET] act={act} lock={submenu_locks[cid]}")
+        chat = q.message.chat
+        is_owner = db.is_owner(uid)
+        try:
+            if act == "back" or act == "main":
+                t, k = settings_menu.main_menu(cid, chat.title or "—", u.first_name or "—", is_owner)
+                await safe_edit(q, t, k); return
+            if act == "skin":
+                log.warning("[SKIN] handler شروع")
+                submenu_locks[cid] = __import__('time').time()
+                try:
+                    t, k = settings_menu.skins_menu(cid)
+                    log.warning(f"[SKIN] menu len={len(t)}")
+                    ok = await safe_edit(q, t, k)
+                    log.warning(f"[SKIN] ok={ok}")
+                except Exception as e:
+                    import traceback
+                    log.warning(f"[SKIN_ERR] {e}\n{traceback.format_exc()}")
+                return
+            if act.startswith("skin_prev:"):
+                submenu_locks[cid] = __import__('time').time()
+                # پیش‌نمایش
+                sk = act.split(":", 1)[1]
+                if sk in panels.SKINS:
+                    t, k = settings_menu.skins_menu(cid, preview=sk)
+                    await safe_edit(q, t, k); return
+            if act.startswith("skin_apply:"):
+                submenu_locks.pop(cid, None)
+                # تایید و اعمال
+                sk = act.split(":", 1)[1]
+                if sk in panels.SKINS:
+                    settings.set_val(cid, "skin", sk)
+                    # اگه پنل زنده هست، refresh کن
+                    refreshed = False
+                    if cid in active_panels:
+                        try:
+                            s = settings.get(cid)
+                            d, _ = await _panel_data(cid)
+                            text2, kb = panels.render(s["skin"], d)
+                            await context.bot.edit_message_text(
+                                text=text2, chat_id=cid,
+                                message_id=active_panels[cid]["msg_id"],
+                                reply_markup=kb
+                            )
+                            refreshed = True
+                        except Exception as e:
+                            log.debug(f"live panel refresh: {e}")
+                    msg = f"✅ اسکین «{panels.SKIN_LABELS[sk]}» اعمال شد"
+                    if refreshed:
+                        msg += "\n🔄 پنل زنده هم آپدیت شد"
+                    await q.answer(msg, show_alert=True)
+                    # برگشت به منو
+                    t, k = settings_menu.skins_menu(cid)
+                    await safe_edit(q, t, k); return
+            if act.startswith("skin:"):
+                sk = act.split(":", 1)[1]
+                if sk in panels.SKINS:
+                    settings.set_val(cid, "skin", sk)
+                    t, k = settings_menu.skins_menu(cid)
+                    await q.edit_message_text(t, reply_markup=k); return
+            if act == "sub":
+                t, k = settings_menu.sub_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "player":
+                t, k = settings_menu.player_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "tools":
+                t, k = settings_menu.tools_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "stats":
+                t, k = settings_menu.stats_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "gifs":
+                t, k = settings_menu.gifs_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "gif_toggle":
+                s = settings.get(cid)
+                settings.set_val(cid, "gif_enabled", 0 if s["gif_enabled"] else 1)
+                t, k = settings_menu.gifs_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "gif_add":
+                gif_add_wait[cid] = True
+                await q.edit_message_text(
+                    "📤 حالا گیفت رو بفرست\n"
+                    "هر GIF، mp4 یا عکس بفرستی ذخیره می‌شه\n\n"
+                    "برای لغو: /cancel",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 انصراف", callback_data="set:gifs")]
+                    ])
+                ); return
+            if act.startswith("gif_act:"):
+                gid = int(act.split(":", 1)[1])
+                import gifs as gifs_mod
+                gifs_mod.set_active(cid, gid)
+                t, k = settings_menu.gifs_menu(cid)
+                await safe_edit(q, t, k); return
+            if act.startswith("gif_del:"):
+                gid = int(act.split(":", 1)[1])
+                import gifs as gifs_mod
+                gifs_mod.delete(cid, gid)
+                t, k = settings_menu.gifs_menu(cid)
+                await safe_edit(q, t, k); return
+            # ─── RECORD ───
+            if act == "rec":
+                t, k = settings_menu.record_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "rec_toggle":
+                import sqlite3
+                _db = Path(__file__).parent / "data" / "settings.db"
+                _c = sqlite3.connect(str(_db))
+                _c.execute("""CREATE TABLE IF NOT EXISTS record_settings (
+                    chat_id INTEGER PRIMARY KEY,
+                    enabled INTEGER DEFAULT 0,
+                    clip_sec INTEGER DEFAULT 300,
+                    updated_at INTEGER)""")
+                _c.commit()
+                _r = _c.execute("SELECT enabled, clip_sec FROM record_settings WHERE chat_id=?",
+                                (cid,)).fetchone()
+                cur_en = _r[0] if _r else 0
+                cur_clip = _r[1] if _r else 300
+                new_en = 0 if cur_en else 1
+                import time as _t
+                _c.execute("""INSERT OR REPLACE INTO record_settings
+                    (chat_id, enabled, clip_sec, updated_at) VALUES (?,?,?,?)""",
+                    (cid, new_en, cur_clip, int(_t.time())))
+                _c.commit()
+                _c.close()
+                # ارسال به player
+                action = "record_start" if new_en else "record_stop"
+                await post_cmd({
+                    "action": action,
+                    "chat_id": cid,
+                    "clip_sec": cur_clip,
+                })
+                lbl = "✅ فعال شد" if new_en else "⏹ خاموش شد"
+                await send_notification(context, cid, f"🎙 ضبط: {lbl}", 5)
+                await update_pin(context, cid, f"🎙 ضبط ویس‌کال: {lbl}")
+                t, k = settings_menu.record_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "rec_clip":
+                t, k = settings_menu.record_clip_menu(cid)
+                await safe_edit(q, t, k); return
+            if act.startswith("rec_clip_set:"):
+                sec = int(act.split(":", 1)[1])
+                import sqlite3
+                _db = Path(__file__).parent / "data" / "settings.db"
+                _c = sqlite3.connect(str(_db))
+                _c.execute("""CREATE TABLE IF NOT EXISTS record_settings (
+                    chat_id INTEGER PRIMARY KEY,
+                    enabled INTEGER DEFAULT 0,
+                    clip_sec INTEGER DEFAULT 300,
+                    updated_at INTEGER)""")
+                _c.commit()
+                _r = _c.execute("SELECT enabled, clip_sec FROM record_settings WHERE chat_id=?",
+                                (cid,)).fetchone()
+                cur_en = _r[0] if _r else 0
+                import time as _t
+                _c.execute("""INSERT OR REPLACE INTO record_settings
+                    (chat_id, enabled, clip_sec, updated_at) VALUES (?,?,?,?)""",
+                    (cid, cur_en, sec, int(_t.time())))
+                _c.commit()
+                _c.close()
+                # اگه فعاله، با clip جدید دوباره شروع کن
+                if cur_en:
+                    await post_cmd({"action": "record_stop", "chat_id": cid})
+                    await asyncio.sleep(0.5)
+                    await post_cmd({"action": "record_start", "chat_id": cid,
+                                    "clip_sec": sec})
+                await send_notification(context, cid,
+                                        f"⏱ طول کلیپ: {sec//60} دقیقه", 5)
+                t, k = settings_menu.record_menu(cid)
+                await safe_edit(q, t, k); return
+
+            if act == "close":
+                submenu_locks.pop(cid, None)
+                active_panels.pop(cid, None)
+                try: await q.message.delete()
+                except: pass
+                return
+            if act.startswith("cfg_"):
+                key = act[4:]
+                s = settings.get(cid)
+                if key == "refresh":
+                    vals = [3, 5, 10, 15, 30]
+                    cur = s["refresh_sec"]
+                    nxt = vals[(vals.index(cur) + 1) % len(vals)] if cur in vals else 5
+                    settings.set_val(cid, "refresh_sec", nxt)
+                elif key == "delete":
+                    vals = [0, 20, 40, 60, 120]
+                    cur = s["auto_delete_sec"]
+                    nxt = vals[(vals.index(cur) + 1) % len(vals)] if cur in vals else 40
+                    settings.set_val(cid, "auto_delete_sec", nxt)
+                elif key == "gif":
+                    settings.set_val(cid, "gif_enabled", 0 if s["gif_enabled"] else 1)
+                t, k = settings_menu.player_menu(cid)
+                await safe_edit(q, t, k); return
+            if act == "tool_reset":
+                await q.answer("ریست...")
+                await post_cmd({"action": "reset_player", "chat_id": cid})
+                return
+            if act == "tool_health":
+                r = await get_srv("/health")
+                await q.answer(f"صف: {r.get('queue','?')}", show_alert=True); return
+            if act == "tool_resetcurrent":
+                try:
+                    async with httpx.AsyncClient(timeout=5) as h:
+                        r = await h.post(f"{SK_SERVER}/reset-current")
+                        d = r.json()
+                    await q.answer(
+                        f"✅ پاک شد: {d.get('cleared',0)} current + {d.get('queued',0)} صف",
+                        show_alert=True
+                    )
+                    # بستن پنل‌های زنده
+                    if cid in active_panels:
+                        try:
+                            await context.bot.delete_message(
+                                cid, active_panels[cid]["msg_id"])
+                        except: pass
+                        active_panels.pop(cid, None)
+                except Exception as e:
+                    await q.answer(f"❌ {e}", show_alert=True)
+                return
+        except Exception as e:
+            log.warning(f"settings cb err: {e}")
+        return
+
+    # ─── player controls (pl:) ───
+
+    # skin choose
+    if data.startswith("skin_set:"):
+        if not await is_owner_or_sudo(uid):
+            await q.answer("دسترسی نداری", show_alert=True); return
+        sk = data.split(":", 1)[1]
+        if sk in panels.SKINS:
+            settings.set_val(cid, "skin", sk)
+            try: await q.edit_message_text(f"✅ اسکین روی «{panels.SKIN_LABELS[sk]}» تنظیم شد")
+            except: pass
+        return
+
+    if data == "pl:close":
+        submenu_locks.pop(cid, None)
+        try: await q.message.delete()
+        except: pass
+        return
+
+    # ─── کنترل‌های پنل پخش: برای همه مجازها ───
+    if data.startswith("pl:"):
+        if not await can_play(uid, cid):
+            await q.answer("دسترسی نداری", show_alert=True); return
+
+    # control actions
+    action_map = {
+        "pl:pause":   "pause",
+        "pl:resume":  "resume",
+        "pl:next":    "next",
+        "pl:prev":    "previous",
+        "pl:stop":    "stop",
+        "pl:vu":      "volume_up",
+        "pl:vd":      "volume_down",
+        "pl:mute":    "mute",
+        "pl:unmute":  "unmute",
+        "pl:rep":     "cycle_repeat",
+        "pl:shuf":    "toggle_shuffle",
+    }
+    if data == "pl:refresh":
+        await open_panel(update, context, from_cb=True); return
+
+    # ─── دانلود فایل ───
+    if data in ("pl:dl128", "pl:dl320"):
+        submenu_locks[cid] = __import__('time').time()
+        quality = 128 if data == "pl:dl128" else 320
+        await q.answer(f"دانلود {quality}K شروع شد...")
+        try:
+            await q.edit_message_text(
+                f"📥 در حال دانلود {quality}K\n⏳ لطفاً صبر کنید...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data="pl:back")],
+                ])
+            )
+        except: pass
+        await post_cmd({
+            "action": "download_file",
+            "chat_id": cid,
+            "quality": quality,
+            "user_id": uid,
+        })
+        return
+
+    # ─── بازگشت به پنل از زیرمنو ───
+    # ═══════════════════════════════════════
+    # اسکین از پنل زنده (فقط مالک/سازنده/سودو)
+    # ═══════════════════════════════════════
+    if data == "live_skin_open":
+        role = _jr.get_role(uid, cid)
+        if role not in ("owner", "player_owner"):
+            await q.answer("⛔ فقط مالک پلیر یا سازنده", show_alert=True)
+            return
+        rows = []
+        cur = (settings.get(cid) or {}).get("skin", "pro")
+        for sk in panels.SKINS:
+            mark = "✅ " if sk == cur else ""
+            lbl = panels.SKIN_LABELS.get(sk, sk)
+            rows.append([InlineKeyboardButton(f"{mark}{lbl}", callback_data=f"live_skin_set:{sk}")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="live_skin_back")])
+        try:
+            await q.edit_message_text(
+                "🎨 **انتخاب اسکین پنل**\n━━━━━━━━━━━━━━━━━\n"
+                f"🎯 فعلی: {panels.SKIN_LABELS.get(cur, cur)}\n"
+                f"📊 {len(panels.SKINS)} اسکین موجود",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                log.warning(f"live_skin_open: {e}")
+        return
+
+    if data.startswith("live_skin_set:"):
+        role = _jr.get_role(uid, cid)
+        if role not in ("owner", "player_owner"):
+            await q.answer("⛔ فقط مالک پلیر یا سازنده", show_alert=True)
+            return
+        sk = data.split(":", 1)[1]
+        if sk in panels.SKINS:
+            settings.set_val(cid, "skin", sk)
+            await q.answer(f"✅ {panels.SKIN_LABELS.get(sk, sk)}")
+            # refresh پنل زنده با اسکین جدید
+            try:
+                await open_live_panel(context.bot, cid, uid, skin=sk, force_new=False)
+            except Exception as e:
+                log.warning(f"live_skin_set refresh: {e}")
+        return
+
+    if data == "live_skin_back":
+        try:
+            await open_live_panel(context.bot, cid, uid, force_new=False)
+        except Exception as e:
+            log.warning(f"live_skin_back: {e}")
+        return
+
+    if data == "pl:back":
+        log.warning(f"[BACK] cid={cid} uid={uid} msg_id={q.message.message_id}")
+        submenu_locks.pop(cid, None)
+        try:
+            s = settings.get(cid)
+            log.warning(f"[BACK] skin={s.get('skin')}")
+            data_p, _ = await _panel_data(cid)
+            log.warning(f"[BACK] panel_data playing={data_p.get('playing')}")
+            text, kb = render_panel_with_extras(s["skin"], data_p, cid)
+            log.warning(f"[BACK] render len={len(text)}")
+            try:
+                await q.edit_message_text(text, reply_markup=kb)
+                log.warning(f"[BACK] ✅ edit OK")
+            except Exception as e:
+                log.warning(f"[BACK] edit fail: {e}")
+                if "not modified" in str(e).lower():
+                    return
+                # fallback: safe_edit
+                try:
+                    await safe_edit(q, text, kb)
+                    log.warning(f"[BACK] ✅ safe_edit OK")
+                except Exception as e2:
+                    log.warning(f"[BACK] safe_edit fail: {e2}")
+        except Exception as e:
+            log.warning(f"[BACK] outer err: {e}")
+            import traceback
+            log.warning(traceback.format_exc())
+        return
+    if data == "pl:eq":
+        submenu_locks[cid] = __import__('time').time()
+        # ★ پریست فعلی
+        try:
+            d, _ = await _panel_data(cid)
+            cur_eq = (d.get("eq") or "off").lower()
+        except:
+            cur_eq = "off"
+        presets = [
+            ("rock", "🎸 Rock"), ("jazz", "🎷 Jazz"), ("pop", "🎤 Pop"),
+            ("classic", "🎻 Classic"), ("bass", "🔊 Bass Boost"),
+            ("treble", "🎼 Treble"), ("vocal", "🎵 Vocal"),
+            ("3d", "🌌 3D"), ("wide", "🔊 Wide"),
+            ("night", "🌙 شب"), ("day", "☀️ روز"),
+            ("silent", "🔇 سکوت"),
+            ("dance", "💃 Dance"), ("hiphop", "🎧 Hip-Hop"),
+            ("heavy", "🤘 Heavy"), ("acoustic", "🎸 Acoustic"),
+        ]
+        rows = []
+        # 2 تا در هر ردیف
+        for i in range(0, len(presets), 2):
+            row = []
+            for j in range(2):
+                if i + j < len(presets):
+                    k, lbl = presets[i + j]
+                    mark = "✅ " if k == cur_eq else ""
+                    row.append(InlineKeyboardButton(
+                        f"{mark}{lbl}", callback_data=f"pl:eq:{k}"
+                    ))
+            rows.append(row)
+        rows.append([InlineKeyboardButton("⭕️ خاموش کردن EQ", callback_data="pl:eq:off")])
+        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="pl:back")])
+        await safe_edit(q,
+            f"🎚 اکولایزر Sk.Team\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🎯 فعال: {cur_eq.upper()}\n\n"
+            f"پریست مورد نظر:",
+            InlineKeyboardMarkup(rows)
+        )
+        return
+
+    if data.startswith("pl:eq:"):
+        submenu_locks[cid] = __import__('time').time()
+        eq_name = data.split(":", 2)[2]
+        # ★ ارسال به سرور
+        await post_cmd({"action": "eq", "chat_id": cid, "eq": eq_name})
+        # ★ اعلان در pin (نوتیف بار)
+        lbl_map = {
+            "rock":"🎸 Rock","jazz":"🎷 Jazz","pop":"🎤 Pop","classic":"🎻 Classic",
+            "bass":"🔊 Bass Boost","treble":"🎼 Treble","vocal":"🎵 Vocal",
+            "3d":"🌌 3D","wide":"🔊 Wide","night":"🌙 شب","day":"☀️ روز",
+            "silent":"🔇 سکوت","dance":"💃 Dance","hiphop":"🎧 Hip-Hop",
+            "heavy":"🤘 Heavy","acoustic":"🎸 Acoustic","off":"⭕️ خاموش"
+        }
+        lbl = lbl_map.get(eq_name, eq_name)
+        # ★ pin notification
+        await update_pin(context, cid, f"🎚 حالت صوتی: {lbl}")
+        await send_notification(context, cid, f"🎚 {lbl}\n✅ اعمال شد", 8)
+        # ★ قفل زیرمنو — تا کاربر ببینه
+        # بعد از ۲۵ ثانیه (ffmpeg re-process)، دکمه‌ها refresh می‌شن
+        # فعلاً فقط refresh کن
+        await asyncio.sleep(1)
+        # refresh منو با تیک
+        try:
+            cur_eq = eq_name
+            presets = [
+                ("rock", "🎸 Rock"), ("jazz", "🎷 Jazz"), ("pop", "🎤 Pop"),
+                ("classic", "🎻 Classic"), ("bass", "🔊 Bass Boost"),
+                ("treble", "🎼 Treble"), ("vocal", "🎵 Vocal"),
+                ("3d", "🌌 3D"), ("wide", "🔊 Wide"),
+                ("night", "🌙 شب"), ("day", "☀️ روز"),
+                ("silent", "🔇 سکوت"),
+                ("dance", "💃 Dance"), ("hiphop", "🎧 Hip-Hop"),
+                ("heavy", "🤘 Heavy"), ("acoustic", "🎸 Acoustic"),
+            ]
+            rows = []
+            for i in range(0, len(presets), 2):
+                row = []
+                for j in range(2):
+                    if i + j < len(presets):
+                        k, l = presets[i + j]
+                        mark = "✅ " if k == cur_eq else ""
+                        row.append(InlineKeyboardButton(f"{mark}{l}", callback_data=f"pl:eq:{k}"))
+                rows.append(row)
+            rows.append([InlineKeyboardButton("⭕️ خاموش کردن EQ", callback_data="pl:eq:off")])
+            rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="pl:back")])
+            await safe_edit(q,
+                f"🎚 اکولایزر Sk.Team\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🎯 فعال: {lbl}\n\n"
+                f"🔄 در حال اعمال... (۱۰-۲۰s)",
+                InlineKeyboardMarkup(rows)
+            )
+        except Exception as e:
+            log.debug(f"eq menu refresh: {e}")
+        return
+    if data == "pl:queue":
+        submenu_locks[cid] = __import__('time').time()
+        try:
+            import httpx as _hx
+            async with _hx.AsyncClient(timeout=5) as _ch:
+                _r = await _ch.get(f"{SK_SERVER}/queue/list", params={"chat_id": cid})
+                _d = _r.json()
+            _items = _d.get("items", [])
+            if not _items:
+                _t = "📋 صف پخش\n\n🕳 صف خالیه"
+            else:
+                _lines = ["📋 صف پخش (" + str(len(_items)) + ")", ""]
+                for i, it in enumerate(_items[:15], 1):
+                    _lines.append(f"{i}. {str(it.get('query','?'))[:40]}")
+                if len(_items) > 15:
+                    _lines.append(f"... و {len(_items)-15} دیگه")
+                _t = "\n".join(_lines)
+            await safe_edit(q, _t, InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="pl:back")],
+                [InlineKeyboardButton("❌ بستن", callback_data="pl:close")],
+            ]))
+        except Exception as _e:
+            log.warning(f"queue err: {_e}")
+        return
+    # ─── seek ───
+    seek_map = {
+        "pl:seek_b60": ("back", 60),
+        "pl:seek_b30": ("back", 30),
+        "pl:seek_f30": ("fwd", 30),
+        "pl:seek_f60": ("fwd", 60),
+    }
+    if data in seek_map:
+        direction, secs = seek_map[data]
+        await send_seek(cid, direction, secs)
+        # notification
+        arrow = "⏩" if direction == "fwd" else "⏪"
+        label = "جلو" if direction == "fwd" else "عقب"
+        await send_notification(context, cid, f"{arrow} {secs}s {label}", 3)
+        await asyncio.sleep(0.3)
+        try:
+            s = settings.get(cid)
+            d, _ = await _panel_data(cid)
+            text, kb = render_panel_with_extras(s["skin"], d, cid)
+            await q.edit_message_text(text, reply_markup=kb)
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                log.debug(f"seek refresh: {e}")
+        return
+
+    # ─── speed ───
+    if data == "pl:spd_dn":
+        log.warning(f"[SPD_DN] cid={cid}")
+        try: await q.answer("⚡ -0.25x")
+        except: pass
+        await send_speed(cid, delta=-0.25)
+        await asyncio.sleep(0.5)
+        try:
+            d, _ = await _panel_data(cid)
+            await send_notification(context, cid, f"⚡ سرعت: {d.get('speed', 1.0)}x", 3)
+        except: pass
+        return
+    if data == "pl:spd_up":
+        await send_speed(cid, delta=0.25)
+        await asyncio.sleep(0.3)
+        try:
+            d, _ = await _panel_data(cid)
+            await send_notification(context, cid, f"⚡ سرعت: {d.get('speed', 1.0)}x", 3)
+        except: pass
+        try:
+            s = settings.get(cid)
+            d, _ = await _panel_data(cid)
+            text, kb = render_panel_with_extras(s["skin"], d, cid)
+            await q.edit_message_text(text, reply_markup=kb)
+        except: pass
+        return
+    if data == "pl:spd_reset":
+        await send_speed(cid, reset=True)
+        await asyncio.sleep(0.3)
+        try:
+            s = settings.get(cid)
+            d, _ = await _panel_data(cid)
+            text, kb = render_panel_with_extras(s["skin"], d, cid)
+            await q.edit_message_text(text, reply_markup=kb)
+        except: pass
+        return
+
+    act = action_map.get(data)
+    if act:
+        # ─── notification text ───
+        notif_text = None
+        # حالت mute/unmute
+        if act == "mute":
+            notif_text = "🔇 پلیر بی‌صدا شد"
+        elif act == "unmute":
+            notif_text = "🔊 پلیر باصدا شد"
+        # اگه stop → پنل بسته
+        if act == "stop":
+            await post_cmd({"action": act, "chat_id": cid})
+            # ★ FIX: صف هم پاک شه
+            try:
+                async with httpx.AsyncClient(timeout=5) as _h:
+                    await _h.post(f"{SK_SERVER}/queue/clear", json={"chat_id": cid})
+                log.info(f"[STOP-CB] queue cleared for {cid}")
+            except Exception as _e:
+                log.warning(f"[STOP-CB] queue clear err: {_e}")
+            try: await q.message.delete()
+            except: pass
+            if notif_text:
+                await send_notification(context, cid, notif_text, 3)
+            # پاک کردن pin
+            if cid in pinned_msgs:
+                try:
+                    await context.bot.unpin_chat_message(cid, pinned_msgs[cid])
+                except: pass
+                pinned_msgs.pop(cid, None)
+            return
+        # ارسال به سرور
+        await post_cmd({"action": act, "chat_id": cid})
+        # ★ برای next: فقط 0.5 ثانیه صبر
+        await asyncio.sleep(0.5)
+
+        # ─── notification با اطلاعات فعلی ───
+        try:
+            s = settings.get(cid)
+            d, _ = await _panel_data(cid)
+            if act == "volume_up":
+                notif_text = f"🔊 صدا: {d.get('volume', '?')}%"
+            elif act == "volume_down":
+                notif_text = f"🔉 صدا: {d.get('volume', '?')}%"
+            elif act == "pause":
+                notif_text = "⏸ پلیر متوقف شد"
+            elif act == "resume":
+                notif_text = "▶️ پلیر ادامه داد"
+            elif act == "next":
+                notif_text = "⏭ آهنگ بعدی"
+            elif act == "cycle_repeat":
+                notif_text = f"🔁 تکرار: {d.get('repeat', 'off')}"
+            elif act == "toggle_shuffle":
+                notif_text = f"🔀 شافل: {'روشن' if d.get('shuffle') else 'خاموش'}"
+        except: pass
+
+        if notif_text:
+            # ★ در pin بذار (نوتیف بار)
+            await update_pin(context, cid, notif_text)
+            # ★ و در چت هم (که کاربر رد بشه)
+            await send_notification(context, cid, notif_text, 3)
+        # refresh پنل
+        s = settings.get(cid)
+        d, _ = await _panel_data(cid)
+        text, kb = render_panel_with_extras(s["skin"], d, cid)
+        await safe_edit(q, text, kb)
+        return
+
+# ─── main msg handler ───
+def _get_owner_call_names(chat_id):
+    """اسم‌های مالکین برای صدا زدن"""
+    names = []
+    try:
+        import sqlite3 as _s
+        from pathlib import Path as _P
+        _db = _P.home() / "skteam_music" / "data" / "settings.db"
+        conn = _s.connect(str(_db), timeout=5)
+        rows = conn.execute("SELECT first_name, username FROM sk_group_owners WHERE chat_id=?", (chat_id,)).fetchall()
+        conn.close()
+        for fn, un in rows:
+            if fn: names.append(fn.lower().strip())
+            if un: names.append(un.lower().strip())
+    except Exception as e:
+        import logging
+        logging.getLogger("SktTeam").warning("[CALL] " + str(e))
+    return names
+
+
+
+async def msg_handler(update, context):
+    m = update.effective_message
+    if not m or not m.text: return
+    # ─── توی PV ───
+    chat = update.effective_chat
+    if chat and chat.type == "private":
+        raw = m.text.strip()
+        # اگه دستور /me یا /mygroups نبود → پیام اشتراک
+        if raw.lower() not in ("پنل", "پنل من", "/me", "/mygroups", "me", "mygroups"):
+            uid = update.effective_user.id
+            is_bot_owner = db.is_owner(uid)
+            if not is_bot_owner:
+                # چک مالک گروه
+                import sqlite3 as _s
+                _db = Path.home() / "groupbot" / "data" / "groupbot.db"
+                has_group = False
+                try:
+                    _c = _s.connect(str(_db))
+                    _r = _c.execute("""SELECT 1 FROM group_owners
+                                       WHERE user_id=? LIMIT 1""",
+                                    (uid,)).fetchone()
+                    _c.close()
+                    has_group = bool(_r)
+                except: pass
+                if not has_group:
+                    await m.reply_text(
+                        "❌ **اشتراک فعال ندارید**\n"
+                        "━━━━━━━━━━━━━━━━━\n"
+                        "برای خرید اشتراک موزیک‌پلیر یا رکورد\n"
+                        "با @Siavashska تماس بگیرید.",
+                        parse_mode="Markdown",
+                    )
+                    return
+                else:
+                    # مالک گروه → راهنما
+                    await m.reply_text(
+                        "📋 برای دیدن گروه‌هات: /me\n"
+                        "برای پشتیبانی: @Siavashska"
+                    )
+                    return
+            else:
+                # سازنده → راهنما
+                await m.reply_text(
+                    "👑 سلام سازنده\n"
+                    "📋 برای دیدن همه گروه‌ها: /me"
+                )
+                return
+    import logging as _lg
+    _lg.getLogger("MSG_IN").warning(
+        "[MSG_IN] chat=%s type=%s user=%s text=%r",
+        m.chat.id, m.chat.type, m.from_user.id if m.from_user else None, m.text[:80]
+    )
+    chat = update.effective_chat; user = update.effective_user
+    if not chat or not user: return
+    cid = chat.id; uid = user.id
+    raw = m.text.strip(); text = fa2en(raw)
+    in_group = chat.type in ("group", "supergroup")
+
+    # ─── پنل تنظیمات ───
+    # ─── صدا زدن ربات ───
+
+
+    CALL_WORDS = {"ربات", "ربات?", "ربات؟", "ربات!", "ربات جان",
+                  "بات", "بات?", "بات؟",
+                  "bot", "Bot", "BOT"}
+    _owner_names = _get_owner_call_names(cid)
+    _raw_low = raw.lower().strip()
+    if raw in CALL_WORDS or _raw_low in ("bot", "robot") or _raw_low in _owner_names:
+        _io = db.is_owner(uid)
+        _cp = await can_play(uid, cid)
+        _is = await is_owner_or_sudo(uid)
+        log.warning(f"[CALL] uid={uid} owner={_io} cp={_cp} sudo={_is}")
+        if _io:
+            sent = await m.reply_text(j_call_owner())
+        elif _cp or _is:
+            sent = await m.reply_text(j_call_user(uid, cid))
+        else:
+            log.warning("[CALL] silent")
+            return
+        if in_group and sent:
+            schedule_delete(context, sent, 20)
+        return
+
+    if raw in ("پنل", "تنظیمات", "پنل تنظیمات"):
+        if not await is_owner_or_sudo(uid):
+            return  # سایلنت
+        is_owner = db.is_owner(uid)
+        text, kb = settings_menu.main_menu(cid, chat.title or "—", user.first_name or "—", is_owner)
+        sent = await m.reply_text(text, reply_markup=kb)
+        if in_group: schedule_delete(context, sent, 90)
+        return
+
+    # ─── پنل پخش ───
+    if raw in ("پلیر", "پخش زنده", "np", "player"):
+        if not await can_play(uid, cid):
+            if not in_group: await m.reply_text(j_notauth())
+            return
+        await open_live_panel(context.bot, cid, uid)
+        return
+
+    q = parse_play(raw)
+    if q:
+        # ★ چک اشتراک موزیک
+        if not await check_music_subscription(cid):
+            sent = await m.reply_text(
+                f"{j_nosub()}\n\n"
+                "👤 @Siavashska",
+                parse_mode="Markdown",
+            )
+            if in_group: schedule_delete(context, sent, 30)
+            return
+        if not await can_play(uid, cid):
+            if not in_group: await m.reply_text(j_notauth())
+            return
+
+        # ─── چک کن چیزی پخش می‌شه یا صف غیرخالی ───
+        now = await get_srv("/now-playing", {"chat_id": cid})
+        is_playing = bool(now.get("playing"))
+
+        # ★ چک صف
+        queue_size = 0
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5) as _h:
+                _r = await _h.get(f"{SK_SERVER}/queue/list", params={"chat_id": cid})
+                queue_size = len(_r.json().get("items", []))
+        except Exception as e:
+            log.debug(f"queue check: {e}")
+
+        # اگه پخش فعاله یا صف غیرخالیه → اضافه به صف
+        if is_playing or queue_size > 0:
+            # ─── در حال پخش → اضافه به صف ───
+            size = await add_to_queue(cid, q, uid, user.first_name or "")
+            sent = await m.reply_text(
+                f"➕ به صف اضافه شد (#{size})\n🎵 {q}"
+            )
+            if in_group: schedule_delete(context, sent, 30)
+            # ★ فقط پنل موجود رو ادیت کن، پنل جدید نساز
+            if cid in active_panels:
+                try:
+                    s = settings.get(cid)
+                    d, _ = await _panel_data(cid)
+                    text, kb = render_panel_with_extras(s["skin"], d, cid)
+                    await context.bot.edit_message_text(
+                        text=text, chat_id=cid,
+                        message_id=active_panels[cid]["msg_id"],
+                        reply_markup=kb
+                    )
+                except Exception as e:
+                    log.debug(f"panel refresh (queue): {e}")
+                    active_panels.pop(cid, None)
+        else:
+            # ─── چیزی پخش نمی‌شه → فوری پخش ───
+            r = await post_cmd({"action": "play", "chat_id": cid,
+                                "query": q, "requested_by": uid,
+                                "requested_by_name": user.first_name or ""})
+            if r.get("ok"):
+                sent = await m.reply_text(f"🎵 {q}\n{j_play(uid, cid)}")
+                if in_group: schedule_delete(context, sent, 15)
+                try:
+                    await asyncio.sleep(2)
+                    await open_live_panel(context.bot, cid, uid)
+                except Exception as e:
+                    log.warning(f"live panel err: {e}")
+            else:
+                sent = await m.reply_text(f"{j_err()}")
+                if in_group: schedule_delete(context, sent, 40)
+        return
+
+    controls = {
+        "توقف": ("stop", lambda: j_stop(uid, cid), 25), "بس کن": ("stop", lambda: j_stop(uid, cid), 25), "استاپ": ("stop", lambda: j_stop(uid, cid), 25),
+        "مکث": ("pause", lambda: j_pause(uid, cid), 25), "پاز": ("pause", lambda: j_pause(uid, cid), 25),
+        "ادامه": ("resume", lambda: j_resume(uid, cid), 25), "continue": ("resume", lambda: j_resume(uid, cid), 25),
+        "بعدی": ("next", lambda: j_next(uid, cid), 25), "next": ("next", lambda: j_next(uid, cid), 25), "skip": ("next", lambda: j_next(uid, cid), 25),
+        "قبلی": ("previous", None, 25), "prev": ("previous", None, 25),
+    }
+    if raw in controls:
+        if not await can_play(uid, cid):
+            if not in_group: await m.reply_text(j_notauth())
+            return
+        act, jf, sec = controls[raw]
+        await post_cmd({"action": act, "chat_id": cid})
+        # ★ FIX: اگه stop بود، صف رو پاک کن
+        if act == "stop":
+            try:
+                async with httpx.AsyncClient(timeout=5) as _h:
+                    await _h.post(f"{SK_SERVER}/queue/clear", json={"chat_id": cid})
+                log.info(f"[STOP] queue cleared for {cid}")
+            except Exception as _e:
+                log.warning(f"[STOP] queue clear err: {_e}")
+        # ─── اگه stop بود، پنل رو ببند ───
+        if act == "stop" and cid in active_panels:
+            try: await close_live_panel(context.bot, cid)
+            except: pass
+        msg_txt = jf() if jf else f"⏮ {act}"
+        sent = await m.reply_text(msg_txt)
+        if in_group: schedule_delete(context, sent, sec)
+        return
+
+    # SOFT_RESET_HANDLER
+    if raw in ("ریست", "reset", "رفرش", "refresh", "سافت ریست", "soft reset"):
+        if not await can_play(uid, cid):
+            return
+        role = _jr.get_role(uid, cid)
+        if role not in ("owner", "player_owner"):
+            sent = await m.reply_text("⛔ فقط مالک پلیر یا سازنده")
+            if in_group: schedule_delete(context, sent, 20)
+            return
+        try:
+            _rst = _jr.soft_reset(uid, cid)
+        except Exception:
+            _rst = j_reset(uid)
+        sent = await m.reply_text(f"♻️ سافت ریست...\n{_rst}")
+        if in_group: schedule_delete(context, sent, 15)
+        try:
+            await post_cmd({"action": "stop", "chat_id": cid})
+            async with httpx.AsyncClient(timeout=5) as _h:
+                await _h.post(f"{SK_SERVER}/queue/clear", json={"chat_id": cid})
+                await _h.post(f"{SK_SERVER}/reset-current")
+        except Exception as _e:
+            log.warning(f"[SOFT-RESET] err: {_e}")
+        if cid in active_panels:
+            try: await close_live_panel(context.bot, cid)
+            except: pass
+        log.info(f"[SOFT-RESET] by {uid} chat={cid}")
+        return
+
+    # HARD_RESET_HANDLER
+    if raw in ("هارد ریست", "hard reset", "ریست کامل", "هارد", "hard"):
+        if int(uid) != 7955185125:
+            sent = await m.reply_text("⛔ هارد ریست فقط برای سازنده‌ست")
+            if in_group: schedule_delete(context, sent, 20)
+            return
+        sent = await m.reply_text(f"💥 هارد ریست...\n{j_hard_reset(uid)}\n\n⏳ ۱۵ ثانیه صبر کن...")
+        if in_group: schedule_delete(context, sent, 25)
+        try:
+            await post_cmd({"action": "stop", "chat_id": cid})
+            async with httpx.AsyncClient(timeout=5) as _h:
+                await _h.post(f"{SK_SERVER}/queue/clear", json={"chat_id": cid})
+                await _h.post(f"{SK_SERVER}/reset-current")
+        except: pass
+        if cid in active_panels:
+            try: await close_live_panel(context.bot, cid)
+            except: pass
+        import subprocess as _sp
+        _sp.Popen(
+            ["bash", "/data/data/com.termux/files/home/sk_media/hard_reset.sh"],
+            start_new_session=True,
+            stdout=_sp.DEVNULL,
+            stderr=_sp.DEVNULL,
+        )
+        log.info(f"[HARD-RESET] by {uid} chat={cid}")
+        return
+
+    mv = VOL_RE.match(text)
+    if mv:
+        if not await can_play(uid, cid):
+            if not in_group: await m.reply_text(j_notauth())
+            return
+        v = max(1, min(200, int(mv.group(1))))
+        await post_cmd({"action": "volume", "chat_id": cid, "volume": v})
+        await update_pin(context, cid, f"🔊 صدا: {v}%")
+        sent = await m.reply_text(f"🔊 صدا: {v}%\n{j_vol()}")
+        if in_group: schedule_delete(context, sent, 5)
+        # پنل رو refresh کن
+        try:
+            if cid in active_panels:
+                s = settings.get(cid)
+                d, _ = await _panel_data(cid)
+                text2, kb = panels.render(s["skin"], d)
+                await context.bot.edit_message_text(
+                    text=text2, chat_id=cid,
+                    message_id=active_panels[cid]["msg_id"],
+                    reply_markup=kb
+                )
+        except: pass
+        return
+
+    if raw in ("چی پخشه؟", "چی پخشه", "الان چی پخشه", "np"):
+        r = await get_srv("/now-playing", {"chat_id": cid})
+        if r.get("playing"):
+            sent = await m.reply_text(f"🎵 {r.get('title','?')}\n⏱ {r.get('duration',0)}s")
+        else:
+            sent = await m.reply_text("🤷 چیزی پخش نمی‌شه")
+        if in_group: schedule_delete(context, sent, 30)
+        return
+
+    if raw.lower() == "پینگ":
+        t0 = time.time()
+        r = await get_srv("/health")
+        ms = int((time.time() - t0) * 1000)
+        ok = "✅" if r.get("ok") else "❌"
+        sent = await m.reply_text(f"🏓 {ms}ms {ok}\n📋 صف: {r.get('queue','?')}")
+        if in_group: schedule_delete(context, sent, 30)
+        return
+
+# ─── register ───
+async def cmd_player(update, context):
+    """پنل پخش (live panel) - برای همه مجازها"""
+    uid = update.effective_user.id
+    cid = update.effective_chat.id
+    if not await can_play(uid, cid):
+        return  # سایلنت
+    await open_live_panel(context.bot, cid, uid)
+
+
+
+async def file_reply_handler(update, context):
+    """وقتی کاربر روی فایل صوتی/ویدیو ریپلای می‌کنه و می‌نویسه پخش"""
+    m = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not m or not chat or not user: return
+    if not m.text: return
+    raw = m.text.strip()
+    # باید ریپلای باشه و کلمه پخش
+    if not m.reply_to_message: return
+    if raw not in ("پخش", "پخش کن", "پلی", "بزن", "play"): return
+
+    cid = chat.id
+    uid = user.id
+    # ★ چک اشتراک موزیک
+    if not await check_music_subscription(cid):
+        await m.reply_text(
+            "❌ **اشتراک موزیک این گروه فعال نیست**\n"
+            "👤 @Siavashska",
+            parse_mode="Markdown",
+        )
+        return
+    if not await can_play(uid, cid):
+        if chat.type not in ("group", "supergroup"):
+            await m.reply_text(j_notauth())
+        return
+
+    # file_id از پیام ریپلای
+    rm = m.reply_to_message
+    file_id = None
+    title = "voice"
+    if rm.audio:
+        file_id = rm.audio.file_id
+        title = rm.audio.title or rm.audio.file_name or "audio"
+    elif rm.voice:
+        file_id = rm.voice.file_id
+        title = "voice"
+    elif rm.video:
+        file_id = rm.video.file_id
+        title = rm.video.file_name or "video"
+    elif rm.document:
+        file_id = rm.document.file_id
+        title = rm.document.file_name or "document"
+    if not file_id:
+        return
+
+    # ارسال به سرور به عنوان file
+    now = await get_srv("/now-playing", {"chat_id": cid})
+    is_playing = bool(now.get("playing"))
+
+    # ★★ دانلود فایل با Bot API → مسیر محلی ──
+    sent = await m.reply_text("📥 دانلود فایل...")
+    try:
+        import os as _os
+        tg_file = await context.bot.get_file(file_id)
+        out_dir = _os.path.expanduser("~/sk_media/tg_files")
+        _os.makedirs(out_dir, exist_ok=True)
+        # extension از فایل اصلی
+        ext = ".mp3"
+        if rm.audio and rm.audio.file_name:
+            ext = _os.path.splitext(rm.audio.file_name)[1] or ".mp3"
+        elif rm.video and rm.video.file_name:
+            ext = _os.path.splitext(rm.video.file_name)[1] or ".mp4"
+        elif rm.document and rm.document.file_name:
+            ext = _os.path.splitext(rm.document.file_name)[1] or ".mp3"
+        safe = "".join(ch for ch in title if ch.isalnum() or ch in " -_")[:40]
+        local_name = f"{int(time.time())}_{safe}{ext}"
+        local_path = _os.path.join(out_dir, local_name)
+        await tg_file.download_to_drive(local_path)
+        log.warning(f"[TG_DL] saved: {local_path}")
+    except Exception as e:
+        log.warning(f"[TG_DL] err: {e}")
+        sent2 = await m.reply_text(f"❌ دانلود نشد: {e}")
+        schedule_delete(context, sent2, 20)
+        return
+    try: await sent.delete()
+    except: pass
+
+    # ★★ مسیر محلی Ubuntu ──
+    ub_path = local_path.replace(
+        _os.path.expanduser("~"),
+        "/data/data/com.termux/files/home"
+    )
+    file_query = f"LOCAL|{ub_path}|{title[:100]}"
+    log.warning(f"[TG_DL] ub_path={ub_path}")
+
+    if is_playing:
+        size = await add_to_queue(cid, file_query, uid, user.first_name or "")
+        sent = await m.reply_text(f"➕ فایل به صف اضافه شد (#{size})\n🎵 {title[:40]}")
+    else:
+        await post_cmd({
+            "action": "play",
+            "chat_id": cid,
+            "query": file_query,
+            "requested_by": uid,
+            "requested_by_name": user.first_name or "",
+        })
+        sent = await m.reply_text(f"🎵 فایل در حال پخش: {title[:40]}")
+        # ★ باز کردن پنل زنده
+        try:
+            await asyncio.sleep(2)
+            await open_live_panel(context.bot, cid, uid)
+        except Exception as e:
+            log.warning(f"file live panel err: {e}")
+    if chat.type in ("group", "supergroup"):
+        schedule_delete(context, sent, 30)
+
+
+
+
+async def gif_upload_handler_debug(update, context):
+    """debug همه پیام‌های غیرمتنی"""
+    import logging as _lg
+    m = update.effective_message
+    chat = update.effective_chat
+    if not m or not chat: return
+    _lg.getLogger("GIF_DBG").warning(
+        f"[ALL_NONTEXT] chat={chat.id} "
+        f"anim={bool(m.animation)} vid={bool(m.video)} "
+        f"doc={bool(m.document)} photo={bool(m.photo)} "
+        f"voice={bool(m.voice)} sticker={bool(m.sticker)} "
+        f"wait={gif_add_wait.get(chat.id)}"
+    )
+
+
+async def gif_upload_handler(update, context):
+    """وقتی کاربر GIF/mp4/عکس می‌فرسته برای ذخیره"""
+    import logging as _lg
+    m = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not m or not chat or not user:
+        return
+    cid = chat.id
+
+    # ─── Debug همیشه ───
+    _lg.getLogger("GIF").warning(
+        f"[GIF_IN] chat={cid} uid={user.id} wait={gif_add_wait.get(cid)} "
+        f"anim={bool(m.animation)} vid={bool(m.video)} doc={bool(m.document)} photo={bool(m.photo)}"
+    )
+
+    # ─── اگه منتظر نیستیم، برو ───
+    if not gif_add_wait.get(cid):
+        return
+    if not await is_owner_or_sudo(user.id):
+        return
+
+    # ─── ★ فوری flag رو بردار تا دوبار پردازش نشه ───
+    gif_add_wait[cid] = False
+
+    # ─── فایل رو استخراج کن ───
+    file_id = None
+    fname = "gif"
+    if m.animation:
+        file_id = m.animation.file_id
+        fname = m.animation.file_name or f"anim_{int(time.time())}"
+    elif m.video:
+        file_id = m.video.file_id
+        fname = m.video.file_name or f"video_{int(time.time())}"
+    elif m.document:
+        file_id = m.document.file_id
+        fname = m.document.file_name or f"doc_{int(time.time())}"
+    elif m.photo:
+        file_id = m.photo[-1].file_id
+        fname = f"photo_{int(time.time())}"
+
+    _lg.getLogger("GIF").warning(f"[GIF] file_id={'YES' if file_id else 'NO'} fname={fname}")
+
+    if not file_id:
+        sent = await m.reply_text("❌ فقط GIF، mp4 یا عکس قبول می‌کنم")
+        schedule_delete(context, sent, 15)
+        return
+
+    # ─── ذخیره ───
+    try:
+        import gifs as gifs_mod
+        gid = gifs_mod.add(cid, file_id, fname, user.id)
+        _lg.getLogger("GIF").warning(f"[GIF] ✅ saved id={gid} name={fname}")
+    except Exception as e:
+        _lg.getLogger("GIF").warning(f"[GIF] save err: {e}")
+        sent = await m.reply_text(f"❌ خطا: {e}")
+        schedule_delete(context, sent, 20)
+        return
+
+    sent = await m.reply_text(f"✅ گیف ذخیره شد: {fname[:30]}")
+    schedule_delete(context, sent, 20)
+
+    # ─── نشون دادن منو ───
+    t, k = settings_menu.gifs_menu(cid)
+    menu_msg = await m.reply_text(t, reply_markup=k)
+    if chat.type in ("group", "supergroup"):
+        schedule_delete(context, menu_msg, 60)
+
+
+async def cmd_cancel(update, context):
+    cid = update.effective_chat.id
+    if gif_add_wait.get(cid):
+        gif_add_wait[cid] = False
+        await update.message.reply_text("❌ لغو شد")
+    else:
+        await update.message.reply_text("چیزی برای لغو نیست")
+
+
+async def cookie_upload_handler(update, context):
+    msg = update.effective_message
+    u = update.effective_user
+    if not msg or not u: return
+    if u.id not in _cookie_wait: return
+    if not msg.document: return
+    fname = msg.document.file_name or ""
+    if "cookie" not in fname.lower() and not fname.endswith(".txt"):
+        await msg.reply_text("❌ فایل باید cookies_yt.txt باشه")
+        return
+    try:
+        import os as _os, shutil as _sh
+        tg_file = await context.bot.get_file(msg.document.file_id)
+        tmp = _os.path.expanduser("~/sk_media/_incoming_cookies.txt")
+        await tg_file.download_to_drive(tmp)
+        UB = "/data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs"
+        dst = UB + "/root/sk_media/cookies_yt.txt"
+        _sh.copy2(tmp, dst)
+        _cookie_wait.discard(u.id)
+        await msg.reply_text("✅ کوکی نصب شد! از پنل تست کن.")
+    except Exception as e:
+        await msg.reply_text("❌ خطا: " + str(e)[:200])
+
+
+async def cmd_bio(update, context):
+    """درباره ربات"""
+    try:
+        import settings as _cfg
+        c = _cfg.get_all_cfg()
+        title = c.get("welcome_title", "🎵 Sk.Team Music Player")
+        intro = c.get("welcome_intro", "ربات موزیک‌پلیر حرفه‌ای")
+        contact = c.get("footer_contact", "📞 @Siavashska")
+        channel = c.get("footer_channel", "")
+        website = c.get("footer_website", "")
+        creator = c.get("creator_url", "https://t.me/Siavashska")
+        text = (f"**{title}**\n━━━━━━━━━━━━━━━━━\n\n"
+                f"{intro}\n\n━━━━━━━━━━━━━━━━━\n{contact}\n")
+        if channel and channel.strip():
+            text += channel + "\n"
+        if website and website.strip():
+            text += website + "\n"
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = [[InlineKeyboardButton("📞 پشتیبانی", url=creator)]]
+        await update.message.reply_text(text, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb), disable_web_page_preview=True)
+    except Exception as e:
+        await update.message.reply_text("🎵 Sk.Team Music Player\n📞 @Siavashska")
+
+
+def register(app):
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("ping", cmd_ping))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("bio", cmd_bio))
+    app.add_handler(CommandHandler("panel", cmd_panel))
+    app.add_handler(CommandHandler("me", cmd_pv_panel))
+    app.add_handler(CommandHandler("mygroups", cmd_pv_panel))
+    app.add_handler(CommandHandler("player", cmd_player))
+    app.add_handler(CommandHandler("skin", cmd_skin))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CallbackQueryHandler(cb_handler))
+    app.add_handler(MessageHandler(
+        filters.ALL & ~filters.TEXT & ~filters.COMMAND,
+        gif_upload_handler,
+    ))
+    app.add_handler(MessageHandler(
+        filters.Document.ALL & filters.ChatType.PRIVATE,
+        cookie_upload_handler,
+    ), group=-5)
+    app.add_handler(MessageHandler(
+        filters.TEXT & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP) & ~filters.COMMAND,
+        file_reply_handler,
+    ), group=5)
+    app.add_handler(MessageHandler(
+        filters.TEXT & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP | filters.ChatType.PRIVATE) & ~filters.COMMAND,
+        msg_handler
+    ))
+
+def main():
+    log.info("=== Sk.Team Music Bot v3 START ===")
+    from telegram.request import HTTPXRequest
+    _req = HTTPXRequest(
+        connection_pool_size=8,
+        read_timeout=60,
+        write_timeout=60,
+        connect_timeout=30,
+        pool_timeout=30,
+    )
+    app = (Application.builder()
+        .token(BOT_TOKEN)
+        .request(_req)
+        .get_updates_request(_req)
+        .post_init(post_init)
+        .build())
+    register(app)
+    log.info("polling...")
+    # [MA-REG]
+    try:
+        import music_admin
+        music_admin.register(app)
+    except Exception as _ma_err:
+        import logging as _lg
+        _lg.getLogger('SktTeam').warning('[MA] reg err: ' + str(_ma_err))
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()

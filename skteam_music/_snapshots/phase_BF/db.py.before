@@ -1,0 +1,101 @@
+"""خواندن از groupbot.db + settings.db"""
+import sqlite3
+from pathlib import Path
+
+GB_DB = Path.home() / "groupbot" / "data" / "groupbot.db"
+SK_DB = Path.home() / "skteam_music" / "data" / "settings.db"
+
+OWNER_ID = 7955185125  # hardcoded - Siavash
+
+
+def _conn_gb():
+    return sqlite3.connect(str(GB_DB), timeout=5)
+
+
+def _conn_sk():
+    return sqlite3.connect(str(SK_DB), timeout=5)
+
+
+def is_owner(uid: int) -> bool:
+    return int(uid) == int(OWNER_ID)
+
+
+def is_sudo(uid: int) -> bool:
+    if int(uid) == int(OWNER_ID):
+        return True
+    try:
+        c = _conn_gb()
+        for sql in [
+            "SELECT 1 FROM users WHERE user_id=? AND is_sudo=1 LIMIT 1",
+            "SELECT 1 FROM users WHERE user_id=? LIMIT 1",
+            "SELECT 1 FROM sudo_users WHERE user_id=? LIMIT 1",
+        ]:
+            try:
+                r = c.execute(sql, (uid,)).fetchone()
+                if r:
+                    c.close()
+                    return True
+            except Exception:
+                continue
+        c.close()
+        return False
+    except Exception:
+        return False
+
+
+def is_music_authorized(chat_id: int, uid: int) -> bool:
+    """
+    ★ چک از هر دو DB:
+      - groupbot.db (قدیمی)
+      - settings.db (جدید — جایی که music_admin می‌نویسه)
+    اگه توی یکی بود → مجاز
+    """
+    import time
+    now = int(time.time())
+
+    # ۱. groupbot.db
+    try:
+        c = _conn_gb()
+        c.execute("""CREATE TABLE IF NOT EXISTS music_authorized (
+            chat_id INTEGER, user_id INTEGER,
+            until_ts INTEGER DEFAULT 0, added_by INTEGER,
+            added_at INTEGER, PRIMARY KEY (chat_id, user_id))""")
+        c.commit()
+        r = c.execute(
+            "SELECT until_ts FROM music_authorized WHERE chat_id=? AND user_id=?",
+            (chat_id, uid),
+        ).fetchone()
+        c.close()
+        if r:
+            until = int(r[0] or 0)
+            if until == 0 or until > now:
+                return True
+    except Exception:
+        pass
+
+    # ۲. settings.db
+    try:
+        c = _conn_sk()
+        r = c.execute(
+            "SELECT until_ts FROM music_authorized WHERE chat_id=? AND user_id=?",
+            (chat_id, uid),
+        ).fetchone()
+        c.close()
+        if r:
+            until = int(r[0] or 0)
+            if until == 0 or until > now:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def list_group_admins(chat_id: int):
+    try:
+        c = _conn_gb()
+        rows = c.execute("SELECT user_id FROM admins WHERE chat_id=?", (chat_id,)).fetchall()
+        c.close()
+        return [r[0] for r in rows]
+    except Exception:
+        return []

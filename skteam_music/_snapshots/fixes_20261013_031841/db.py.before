@@ -1,0 +1,66 @@
+"""خواندن از groupbot.db"""
+import sqlite3
+from pathlib import Path
+
+DB_PATH = Path.home() / "groupbot/data/groupbot.db"
+
+def _conn():
+    return sqlite3.connect(str(DB_PATH), timeout=5)
+
+OWNER_ID = 7955185125  # hardcoded - Siavash
+
+def is_owner(uid: int) -> bool:
+    return int(uid) == int(OWNER_ID)
+
+def is_sudo(uid: int) -> bool:
+    # OWNER همیشه sudo محسوب می‌شه
+    if int(uid) == int(OWNER_ID):
+        return True
+    try:
+        c = _conn()
+        # تلاش: جدول users
+        for sql in [
+            "SELECT 1 FROM users WHERE user_id=? AND is_sudo=1 LIMIT 1",
+            "SELECT 1 FROM users WHERE user_id=? LIMIT 1",
+            "SELECT 1 FROM sudo_users WHERE user_id=? LIMIT 1",
+        ]:
+            try:
+                r = c.execute(sql, (uid,)).fetchone()
+                if r:
+                    c.close()
+                    return True
+            except Exception:
+                continue
+        c.close()
+        return False
+    except Exception:
+        return False
+
+def is_music_authorized(chat_id: int, uid: int) -> bool:
+    try:
+        c = _conn()
+        # جدول رو موقت بساز اگه نیست
+        c.execute("""CREATE TABLE IF NOT EXISTS music_authorized (
+            chat_id INTEGER, user_id INTEGER,
+            until_ts INTEGER DEFAULT 0, added_by INTEGER,
+            added_at INTEGER, PRIMARY KEY (chat_id, user_id))""")
+        c.commit()
+        r = c.execute("SELECT until_ts FROM music_authorized WHERE chat_id=? AND user_id=?",
+                      (chat_id, uid)).fetchone()
+        c.close()
+        if not r:
+            return False
+        import time
+        until = int(r[0] or 0)
+        return until == 0 or until > int(time.time())
+    except Exception:
+        return False
+
+def list_group_admins(chat_id: int):
+    try:
+        c = _conn()
+        rows = c.execute("SELECT user_id FROM admins WHERE chat_id=?", (chat_id,)).fetchall()
+        c.close()
+        return [r[0] for r in rows]
+    except Exception:
+        return []

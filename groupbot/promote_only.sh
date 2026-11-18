@@ -1,0 +1,62 @@
+#!/data/data/com.termux/files/usr/bin/bash
+
+echo "⏱️  صبر ۱۵۰ ثانیه..."
+sleep 150
+
+cd ~/groupbot && source venv/bin/activate
+
+python3 << 'PYEOF'
+import asyncio
+from telegram import Bot
+from config import BOT_TOKEN
+
+USERBOT_ID = 8250087472
+CHATS = [-1004463882429, -1004349813270]
+
+
+async def promote_all():
+    bot = Bot(token=BOT_TOKEN)
+    for cid in CHATS:
+        print(f"\n═══ {cid} ═══")
+        try:
+            ub = await bot.get_chat_member(cid, USERBOT_ID)
+            print(f"  userbot: {ub.user.first_name} ({ub.status})")
+            
+            if ub.status == "administrator":
+                print(f"  ✅ از قبل ادمینه")
+                continue
+            
+            if ub.status == "member":
+                try:
+                    await bot.promote_chat_member(
+                        chat_id=cid,
+                        user_id=USERBOT_ID,
+                        can_delete_messages=True,
+                        can_restrict_members=True,
+                        can_pin_messages=True,
+                        can_invite_users=True,
+                        can_change_info=False,
+                        can_promote_members=False,
+                        can_manage_video_chats=True,
+                        can_manage_chat=False,
+                        is_anonymous=False,
+                    )
+                    print(f"  ✅ promote شد")
+                except Exception as e:
+                    print(f"  ❌ promote خطا: {e}")
+        except Exception as e:
+            print(f"  ❌ {e}")
+        
+        # ۵ ثانیه صبر بین درخواست‌ها
+        await asyncio.sleep(5)
+    
+    await bot.close()
+
+
+asyncio.run(promote_all())
+PYEOF
+
+echo ""
+echo "═══════════════════════════════════════════════════"
+echo "✅ Done"
+echo "═══════════════════════════════════════════════════"

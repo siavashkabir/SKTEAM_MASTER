@@ -1,0 +1,1397 @@
+import os
+import sys
+import asyncio
+from datetime import datetime, timedelta
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from modules.admin_perms import admin_list_menu, deputy_list_menu, perms_menu, PERMS
+from modules.subs_menu import sub_manage_menu, sub_status_menu, vcall_sub_menu, music_sub_menu
+from config import SUPPORT_USERNAME, BOT_USERNAME, OWNER_ID, RESTART_FLAG_FILE
+from database import (
+    is_bot_admin, is_deputy, get_all_vips, is_group_owner,
+    get_all_deputy_perms, DEPUTY_PERMS, get_group_owner, update_group,
+    get_all_bot_admins
+)
+from modules.i18n import t, set_lang
+from modules.subscription import check_active, get_expire, DATE_FMT
+
+NL = chr(10)
+TIMEOUT_SECONDS = 60
+
+
+async def is_privileged_async(user_id, chat, bot):
+    try:
+        if user_id == OWNER_ID:
+            return True
+        if is_bot_admin(user_id):
+            return True
+    except Exception:
+        pass
+    if chat is not None:
+        try:
+            m = await bot.get_chat_member(chat.id, user_id)
+            if m.status == "creator":
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def is_bot_owner_or_sudo(uid):
+    """سازنده ربات یا ادمین ربات (سودو)"""
+    try:
+        if uid == OWNER_ID:
+            return True
+        if is_bot_admin(uid):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def user_is_owner_like(uid, chat_id):
+    """سازنده / سودو / مالک گروه"""
+    try:
+        if uid == OWNER_ID:
+            return True
+        if is_bot_admin(uid):
+            return True
+        if is_group_owner(chat_id, uid):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# ============================================
+# پنل سازنده (فقط OWNER_ID و ادمین های ربات)
+# ============================================
+
+def sudo_panel_menu(uid, chat_id=0):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 مدیریت اشتراک‌ها", callback_data="sub_manage:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("👥 مدیریت گروه", callback_data="op_manage:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("⚙️ تنظیمات گروه", callback_data="op_settings:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("🛡️ مدیریت ادمین‌های ربات", callback_data="op_botadmins:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("🔑 دسترسی معاون", callback_data="depset_menu:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("📖 راهنمای سازنده", callback_data="op_ownerguide:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+# ============================================
+# پنل مالک گروه (بدون اشتراک و ادمین ربات)
+# ============================================
+
+def group_owner_panel_menu(uid, chat_id=0):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 اشتراک‌های من", callback_data="sub_status:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("👥 مدیریت گروه", callback_data="op_manage:" + str(uid) + ":" + str(chat_id)),
+         InlineKeyboardButton("⚙️ تنظیمات گروه", callback_data="op_settings:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("🔔 تنظیمات پیوی ربات", callback_data="notif_menu:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("📖 راهنمای مالک گروه", callback_data="op_ownerguide:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+def _group_owner_panel_old(uid, chat_id=0):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("مدیریت گروه", callback_data="op_manage:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("تنظیمات گروه", callback_data="op_settings:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("دسترسی معاون", callback_data="depset_menu:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("راهنما مالک گروه", callback_data="op_ownerguide:" + str(uid))],
+        [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+# ============================================
+# مدیریت
+# ============================================
+
+def owner_manage_menu(uid, chat_id=0):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 وضعیت گروه", callback_data="menu_status:" + str(uid)),
+         InlineKeyboardButton("👑 صاحبان گروه", callback_data="menu_owners:" + str(uid))],
+        [InlineKeyboardButton("👥 مدیران", callback_data="menu_admins:" + str(uid)),
+         InlineKeyboardButton("⭐ اعضای ویژه", callback_data="menu_vip:" + str(uid))],
+        [InlineKeyboardButton("🔑 معاونین", callback_data="menu_deputies:" + str(uid))],
+        [InlineKeyboardButton("🔐 دسترسی ادمین‌ها", callback_data="menu_admin_perms:" + str(uid) + ":" + str(chat_id)),
+         InlineKeyboardButton("🔐 دسترسی معاونین", callback_data="menu_deputy_perms:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="op_back:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+# ============================================
+# تنظیمات
+# ============================================
+
+def owner_settings_menu(uid, chat_id=0):
+    from database import get_setting
+    invite_after_unban = get_setting(chat_id, "invite_after_unban", "0")
+    inv_status = "✅" if invite_after_unban == "1" else "❌"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔒 قفل‌های اصلی", callback_data="menu_locks"),
+         InlineKeyboardButton("📸 قفل‌های رسانه", callback_data="menu_media")],
+        [InlineKeyboardButton("🔄 حالت گروه", callback_data="menu_modes"),
+         InlineKeyboardButton("👋 خوش‌آمدگویی", callback_data="welcome_menu:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("🔞 NSFW", callback_data="nsfw_menu:" + str(uid) + ":" + str(chat_id)),
+         InlineKeyboardButton("⚠️ تنظیمات اخطار", callback_data="warnset_menu:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("🧹 پاکسازی گروه", callback_data="purge_menu:" + str(uid) + ":" + str(chat_id)),
+         InlineKeyboardButton("🔗 لینک گروه", callback_data="link_menu:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("📩 لینک بعد از آنبن " + inv_status, callback_data="invite_unban_toggle:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("🎮 بازی‌ها " + ("✅" if get_setting(chat_id, "games_enabled", "1") == "1" else "❌"), callback_data="games_toggle:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="op_back:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+# ============================================
+# مدیریت اشتراک گروه
+# ============================================
+
+def owner_sub_menu(uid, chat_id=0):
+    expire = get_expire(chat_id) if chat_id else None
+    if expire:
+        try:
+            exp = datetime.strptime(expire, DATE_FMT)
+            if exp > datetime.now():
+                remain = exp - datetime.now()
+                status = "فعال - " + str(remain.days) + " روز"
+            else:
+                status = "منقضی شده"
+        except Exception:
+            status = "نامشخص"
+    else:
+        status = "فعال نیست"
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("وضعیت: " + status, callback_data="op_sub_status:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("تمدید 30 روزه", callback_data="op_sub_30:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("تمدید 90 روزه", callback_data="op_sub_90:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("تمدید 1 ساله", callback_data="op_sub_365:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("غیرفعال کردن گروه", callback_data="op_sub_off:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("بازگشت", callback_data="op_back:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+# ============================================
+# مدیریت ادمین های ربات
+# ============================================
+
+def owner_botadmins_menu(uid, chat_id=0):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("لیست ادمین های ربات", callback_data="op_ba_list:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("راهنما مدیریت ادمین", callback_data="op_ba_help:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("بازگشت", callback_data="op_back:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+# ============================================
+# پنل ادمین گروه (Telegram Admin)
+# ============================================
+
+def group_panel_menu(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 مدیریت گروه", callback_data="menu_manage:" + str(uid)),
+         InlineKeyboardButton("⚙️ تنظیمات گروه", callback_data="menu_settings:" + str(uid))],
+        [InlineKeyboardButton("📖 راهنما", callback_data="menu_help:" + str(uid))],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+def group_manage_menu(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 وضعیت گروه", callback_data="menu_status:" + str(uid)),
+         InlineKeyboardButton("👑 صاحبان گروه", callback_data="menu_owners:" + str(uid))],
+        [InlineKeyboardButton("👥 مدیران", callback_data="menu_admins:" + str(uid)),
+         InlineKeyboardButton("⭐ اعضای ویژه", callback_data="menu_vip:" + str(uid))],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back:" + str(uid))],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+def group_settings_menu(uid, chat_id=None):
+    if chat_id is None:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back:" + str(uid))],
+            [InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))],
+        ])
+    # گرفتن دسترسی‌های ادمین
+    try:
+        from database import get_all_perms
+        perms = get_all_perms(chat_id, uid)
+    except Exception:
+        perms = {}
+    def has(k):
+        return perms.get(k, False)
+    keyboard = []
+    row = []
+    # فقط چیزهایی که دسترسی داره
+    if has("locks"):
+        row.append(InlineKeyboardButton("🔒 قفل‌های اصلی", callback_data="menu_locks"))
+    if has("media"):
+        row.append(InlineKeyboardButton("📸 قفل‌های رسانه", callback_data="menu_media"))
+    if row:
+        keyboard.append(row)
+        row = []
+    if has("welcome"):
+        row.append(InlineKeyboardButton("👋 خوش‌آمدگویی", callback_data="welcome_menu:" + str(uid) + ":" + str(chat_id)))
+    if has("nsfw"):
+        row.append(InlineKeyboardButton("🔞 NSFW", callback_data="nsfw_menu:" + str(uid) + ":" + str(chat_id)))
+    if row:
+        keyboard.append(row)
+        row = []
+    if has("warn"):
+        row.append(InlineKeyboardButton("⚠️ تنظیمات اخطار", callback_data="warnset_menu:" + str(uid) + ":" + str(chat_id)))
+    if has("purge"):
+        row.append(InlineKeyboardButton("🧹 پاکسازی گروه", callback_data="purge_menu:" + str(uid) + ":" + str(chat_id)))
+    if row:
+        keyboard.append(row)
+        row = []
+    if has("link"):
+        row.append(InlineKeyboardButton("🔗 لینک گروه", callback_data="link_menu:" + str(uid) + ":" + str(chat_id)))
+    if has("vip"):
+        row.append(InlineKeyboardButton("⭐ اعضای ویژه", callback_data="menu_vip:" + str(uid)))
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back:" + str(uid))])
+    keyboard.append([InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))])
+    return InlineKeyboardMarkup(keyboard)
+
+
+# ============================================
+# پنل پی وی
+# ============================================
+
+def pv_menu(uid):
+    from database import get_all_bot_chats
+    chats = get_all_bot_chats()
+    keyboard = []
+    if chats:
+        for cid, title in chats[:20]:
+            label = (title or str(cid))[:30]
+            keyboard.append([InlineKeyboardButton(label, callback_data="pv_chat:" + str(uid) + ":" + str(cid))])
+    else:
+        keyboard.append([InlineKeyboardButton("هنوز گروهی اضافه نشده", callback_data="pv_none:" + str(uid))])
+    keyboard.append([InlineKeyboardButton("بستن", callback_data="menu_close:" + str(uid))])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def pv_chat_menu(uid, chat_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("مدیریت", callback_data="pvc_manage:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("تنظیمات", callback_data="pvc_settings:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("بازگشت", callback_data="pv_back:" + str(uid))],
+        [InlineKeyboardButton("بستن", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+HELP_PAGES = {
+    1: "📖 راهنما - صفحه 1/4" + chr(10) + "━━━━━━━━━━━━━━━━" + chr(10) + chr(10) +
+       "🔐 سیستم دسترسی" + chr(10) + chr(10) +
+       "منوی شما بر اساس دسترسی‌هایی که مالک گروه به شما داده باز می‌شود." + chr(10) + chr(10) +
+       "📌 اگر چیزی در منوی شما نیست، یعنی مالک گروه به شما آن دسترسی را نداده است." + chr(10) + chr(10) +
+       "برای دریافت دسترسی بیشتر، با مالک گروه تماس بگیرید.",
+    2: "📖 راهنما - صفحه 2/4" + chr(10) + "━━━━━━━━━━━━━━━━" + chr(10) + chr(10) +
+       "👥 بخش مدیریت گروه" + chr(10) + chr(10) +
+       "• 📊 وضعیت گروه: مشاهده اطلاعات کلی گروه" + chr(10) +
+       "• 👑 صاحبان گروه: لیست مالکین" + chr(10) +
+       "• 👥 مدیران: لیست ادمین‌های گروه" + chr(10) +
+       "• ⭐ اعضای ویژه: لیست اعضای VIP" + chr(10) + chr(10) +
+       "🔑 معاونین فقط توسط مالک گروه قابل مدیریت است.",
+    3: "📖 راهنما - صفحه 3/4" + chr(10) + "━━━━━━━━━━━━━━━━" + chr(10) + chr(10) +
+       "⚙️ بخش تنظیمات گروه" + chr(10) + chr(10) +
+       "• 🔒 قفل‌های اصلی: قفل لینک، تلگرام، هشتگ، وب و..." + chr(10) +
+       "• 📸 قفل‌های رسانه: قفل متن، ویس، موزیک، فیلم، استیکر و..." + chr(10) +
+       "• 👋 خوش‌آمدگویی: تنظیم پیام خوش‌آمدگویی" + chr(10) +
+       "• 🔞 NSFW: فیلتر محتوای بزرگسال" + chr(10) +
+       "• ⚠️ تنظیمات اخطار: مدیریت اخطار کاربران" + chr(10) +
+       "• 🧹 پاکسازی گروه: پاکسازی خودکار پیام‌ها" + chr(10) +
+       "• 🔗 لینک گروه: ساخت لینک یکبار مصرف یا دائمی",
+    4: "📖 راهنما - صفحه 4/4" + chr(10) + "━━━━━━━━━━━━━━━━" + chr(10) + chr(10) +
+       "💡 نکات مهم" + chr(10) + chr(10) +
+       "• هر دسترسی توسط مالک گروه به‌صورت جداگانه قابل فعال/غیرفعال است." + chr(10) +
+       "• با فعال شدن هر دسترسی، دکمه‌ی مربوطه در منوی شما ظاهر می‌شود." + chr(10) +
+       "• با غیرفعال شدن، دکمه از منوی شما حذف می‌شود." + chr(10) + chr(10) +
+       "👤 پشتیبانی: @Siavashska",
+}
+
+
+def help_menu(uid, page):
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data="help_page_" + str(page - 1) + ":" + str(uid)))
+    if page < 4:
+        nav.append(InlineKeyboardButton("بعدی ➡️", callback_data="help_page_" + str(page + 1) + ":" + str(uid)))
+    keyboard = []
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back:" + str(uid))])
+    keyboard.append([InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def back_kb(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("بازگشت", callback_data="menu_back:" + str(uid))],
+        [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+def back_manage_kb(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("بازگشت به مدیریت", callback_data="menu_manage:" + str(uid))],
+        [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+
+
+# ============================================
+# تایمر
+# ============================================
+
+async def auto_close(context):
+    job = context.job
+    try:
+        await context.bot.delete_message(chat_id=job.chat_id, message_id=job.data)
+    except Exception:
+        pass
+
+
+def reset_timer(context, chat_id, message_id):
+    try:
+        if context.job_queue is None:
+            return
+        for job in context.job_queue.get_jobs_by_name("autoclose_" + str(message_id)):
+            job.schedule_removal()
+        context.job_queue.run_once(auto_close, TIMEOUT_SECONDS, chat_id=chat_id, data=message_id, name="autoclose_" + str(message_id))
+    except Exception as e:
+        print("[TIMER ERR] " + str(e))
+
+
+# ============================================
+# نوتیفیکیشن ریستارت
+# ============================================
+
+async def send_restart_notification(context):
+    try:
+        if not os.path.exists(RESTART_FLAG_FILE):
+            return
+        with open(RESTART_FLAG_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        os.remove(RESTART_FLAG_FILE)
+        if not content:
+            return
+        parts = content.split("|")
+        owner_id = int(parts[0]) if parts else OWNER_ID
+        initiator = int(parts[1]) if len(parts) > 1 else 0
+        chat_id = int(parts[2]) if len(parts) > 2 else 0
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        text = "✅ ربات راه اندازی مجدد شد" + NL + "🕐 " + now + NL + "👤 " + str(initiator)
+        try:
+            await context.bot.send_message(chat_id=owner_id, text=text)
+        except Exception:
+            pass
+        if chat_id and chat_id != owner_id:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=text)
+            except Exception:
+                pass
+    except Exception as e:
+        print("[RESTART NOTIF ERR] " + str(e))
+
+
+# ============================================
+# دستور start
+# ============================================
+
+async def start(update, context):
+    if update.effective_chat and update.effective_chat.type == "private":
+        return
+    chat_type = update.effective_chat.type
+    chat_id = update.effective_chat.id
+    uid = update.effective_user.id
+    args = context.args
+
+    try:
+        if not hasattr(context.application, "_restart_notified"):
+            context.application._restart_notified = True
+            await send_restart_notification(context)
+    except Exception:
+        pass
+
+    if chat_type == "private":
+        if args and args[0].startswith("pv_"):
+            try:
+                target_chat = int(args[0][3:])
+            except Exception:
+                target_chat = None
+            if target_chat:
+                try:
+                    m = await context.bot.get_chat_member(target_chat, uid)
+                    if m.status != "creator" and not is_group_owner(target_chat, uid):
+                        await update.message.reply_text("فقط مالک گروه")
+                        return
+                except Exception as e:
+                    await update.message.reply_text("خطا: " + str(e))
+                    return
+                title = str(target_chat)
+                try:
+                    info = await context.bot.get_chat(target_chat)
+                    title = info.title or str(target_chat)
+                except Exception:
+                    pass
+                sent = await update.message.reply_text("پنل گروه: " + title + NL + NL + "گزینه مورد نظر:", reply_markup=pv_chat_menu(uid, target_chat))
+                reset_timer(context, sent.chat_id, sent.message_id)
+                return
+        sent = await update.message.reply_text("پنل مالک ربات:" + NL + "گروه رو انتخاب کن:", reply_markup=pv_menu(uid))
+        reset_timer(context, sent.chat_id, sent.message_id)
+        return
+
+    if chat_type in ("group", "supergroup"):
+        if not check_active(chat_id):
+            await update.message.reply_text("این ربات هنوز فعال نشده" + NL + NL + "برای فعال سازی با پشتیبانی تماس بگیرید")
+            return
+        # تشخیص نقش
+        if is_bot_owner_or_sudo(uid):
+            sent = await update.message.reply_text(
+                "پنل سازنده ربات - بخش مورد نظر:",
+                reply_markup=sudo_panel_menu(uid, chat_id)
+            )
+        elif is_group_owner(chat_id, uid):
+            sent = await update.message.reply_text(
+                "پنل مالک گروه - بخش مورد نظر:",
+                reply_markup=group_owner_panel_menu(uid, chat_id)
+            )
+        else:
+            sent = await update.message.reply_text(
+                "منوی اصلی - بخش مورد نظر:",
+                reply_markup=group_panel_menu(uid)
+            )
+        reset_timer(context, sent.chat_id, sent.message_id)
+
+
+
+
+def _safe_after_lang(uid, chat_id=None):
+    """بعد از تغییر زبان، پنل مناسب رو برمی‌گردونه"""
+    try:
+        from database import is_group_owner, is_bot_admin
+        from config import OWNER_ID
+        if uid == OWNER_ID or is_bot_admin(uid):
+            return sudo_panel_menu(uid, chat_id or 0)
+        if chat_id and is_group_owner(chat_id, uid):
+            return group_owner_panel_menu(uid, chat_id)
+    except Exception:
+        pass
+    return None
+
+async def lang_cmd(update, context):
+    chat_id = update.effective_chat.id
+    uid = update.effective_user.id
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇮🇷 فارسی", callback_data="set_lang_fa:" + str(uid))],
+        [InlineKeyboardButton("🇬🇧 English", callback_data="set_lang_en:" + str(uid))],
+        [InlineKeyboardButton("❌ بستن پنل", callback_data="menu_close:" + str(uid))],
+    ])
+    sent = await update.message.reply_text("🌐 لطفاً زبان مورد نظر را انتخاب کنید:", reply_markup=kb)
+    reset_timer(context, sent.chat_id, sent.message_id)
+
+
+async def rules_cmd(update, context):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(t(chat_id, "help_page_3"))
+
+
+async def id_cmd(update, context):
+    await update.message.reply_text("ID: " + str(update.effective_user.id) + NL + "Chat: " + str(update.effective_chat.id))
+
+
+async def do_restart(update, context):
+    user = update.effective_user
+    chat = update.effective_chat
+    allowed = await is_privileged_async(user.id, chat, context.bot)
+    if not allowed:
+        await update.message.reply_text("⛔ دسترسی ندارید.")
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    await update.message.reply_text("🔄 ریستارت..." + NL + "🕐 " + now)
+    try:
+        os.makedirs(os.path.dirname(RESTART_FLAG_FILE), exist_ok=True)
+        with open(RESTART_FLAG_FILE, "w", encoding="utf-8") as f:
+            f.write(str(OWNER_ID) + "|" + str(user.id) + "|" + str(chat.id))
+    except Exception as e:
+        print("[RESTART FLAG ERR] " + str(e))
+    await asyncio.sleep(2)
+    try:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        print("[RESTART ERR] " + str(e))
+
+
+async def do_refresh(update, context):
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat:
+        return
+    
+    is_owner = (user.id == OWNER_ID)
+    
+    # توی پیوی فقط سازنده اجازه داره
+    if chat.type == "private":
+        if not is_owner:
+            await update.message.reply_text("❌ این دستور فقط در گروه قابل استفاده است.")
+            return
+        # نمایش لیست ادمین‌های ربات و گروه‌ها
+        progress = await update.message.reply_text("⏳ در حال پیکربندی...")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            from database import get_all_bot_admins
+            bot_admins = get_all_bot_admins() or []
+            lines = []
+            for a in bot_admins:
+                uid = a[0] if isinstance(a, tuple) else a.get("user_id", 0)
+                name = a[1] if isinstance(a, tuple) else a.get("first_name", "?")
+                uname = a[2] if isinstance(a, tuple) else a.get("username", "")
+                uname_str = ("@" + uname) if uname else ""
+                lines.append("• " + (name or "?") + " " + uname_str)
+            # لیست گروه‌ها
+            import sqlite3
+            from config import DATABASE_PATH
+            conn = sqlite3.connect(DATABASE_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT chat_id, title FROM groups")
+            groups = cur.fetchall()
+            conn.close()
+            g_lines = []
+            for gid, title in groups:
+                g_lines.append("• " + (title or "?") + " (`" + str(gid) + "`)")
+            text = ("✅ پیکربندی انجام شد!" + NL + "━━━━━━━━━━━━━━━━" + NL +
+                    "🕒 " + now + NL + "👤 " + (user.first_name or "?") + NL + NL +
+                    "👮 ادمین‌های ربات (" + str(len(lines)) + "):" + NL +
+                    (NL.join(lines) if lines else "— هیچ ادمین رباتی ثبت نشده") + NL + NL +
+                    "👥 گروه‌ها (" + str(len(g_lines)) + "):" + NL +
+                    (NL.join(g_lines) if g_lines else "— هیچ گروهی ثبت نشده"))
+            try:
+                await progress.edit_text(text, parse_mode="Markdown")
+            except Exception:
+                await update.message.reply_text(text)
+        except Exception as e:
+            try:
+                await progress.edit_text("❌ خطا: " + str(e))
+            except Exception:
+                pass
+        return
+    
+    # توی گروه
+    if chat.type not in ("group", "supergroup"):
+        return
+    allowed = False
+    try:
+        if is_owner or is_bot_admin(user.id):
+            allowed = True
+        elif is_group_owner(chat.id, user.id):
+            allowed = True
+        else:
+            # چک دسترسی معاون برای پیکربندی
+            from database import get_admin_perm
+            if get_admin_perm(chat.id, user.id, "config"):
+                allowed = True
+    except Exception:
+        pass
+    if not allowed:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+    progress = await update.message.reply_text("⏳ در حال پیکربندی...")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        owners = [a for a in admins if a.status == "creator"]
+        lines = []
+        for a in admins:
+            name = a.user.first_name or "?"
+            uname = ("@" + a.user.username) if a.user.username else ""
+            role = "👑 مالک" if a.status == "creator" else "👮 ادمین"
+            lines.append("• " + name + " " + uname + " (" + role + ")")
+        details = NL.join(lines) if lines else "— هیچ ادمینی یافت نشد"
+        text = ("✅ پیکربندی انجام شد!" + NL + "━━━━━━━━━━━━━━━━" + NL +
+                "🕒 " + now + NL + "👤 " + (user.first_name or "?") + NL + NL +
+                "👥 گروه: " + (chat.title or "?") + NL +
+                "👮 تعداد ادمین‌ها: " + str(len(admins)) + NL + "👑 مالکین: " + str(len(owners)) + NL + NL +
+                "📋 لیست ادمین‌ها:" + NL + details)
+        try:
+            await progress.edit_text(text)
+        except Exception:
+            await update.message.reply_text(text)
+    except Exception as e:
+        try:
+            await progress.edit_text("❌ " + str(e))
+        except Exception:
+            pass
+
+
+async def persian_handler(update, context):
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+    text = msg.text.strip()
+    print("[PERSIAN] got: " + text)
+    if text in ("ریستارت", "راه اندازی مجدد"):
+        await do_restart(update, context)
+        return
+    if text in ("بروزرسانی", "بروزرسانی", "پیکربندی", "ریفرش", "رفرش"):
+        await do_refresh(update, context)
+        return
+
+
+# ============================================
+# هندلر اصلی
+# ============================================
+
+
+
+async def _get_owner_group(clicker_id, chat_id, parts):
+    """پیدا کردن آیدی گروه واقعی برای کاربر مالک"""
+    try:
+        group_chat = int(parts[2]) if len(parts) > 2 else chat_id
+    except Exception:
+        group_chat = chat_id
+    # اگه group_chat همون user id بود (یعنی توی پیوی هستیم)
+    if group_chat == clicker_id or group_chat == chat_id:
+        try:
+            from database import is_group_owner as _igo
+            import sqlite3
+            from config import DATABASE_PATH
+            conn = sqlite3.connect(DATABASE_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT chat_id FROM groups")
+            for (gid,) in cur.fetchall():
+                if _igo(gid, clicker_id):
+                    group_chat = gid
+                    break
+            conn.close()
+        except Exception:
+            pass
+    return group_chat
+
+
+async def handler(update, context):
+    query = update.callback_query
+    data_full = query.data
+    clicker_id = query.from_user.id
+
+    parts = data_full.split(":")
+    action = parts[0]
+    print("[HANDLER DEBUG] action=" + action + " data=" + data_full + " clicker=" + str(clicker_id))
+
+    # ========== Admin/Deputy Permissions ==========
+    if action == "menu_admin_perms":
+        try:
+            from modules.admin_perms import get_group_admins_list, admin_list_menu
+            cv = int(parts[2]) if len(parts) > 2 else chat_id
+            admins = get_group_admins_list(cv)
+            kb = admin_list_menu(clicker_id, cv, admins)
+            await query.edit_message_text("🔐 دسترسی ادمین‌ها" + NL + NL + "یکی از ادمین‌ها را انتخاب کنید:", reply_markup=kb)
+        except Exception as e:
+            print("[ADMIN_PERMS ERR] " + str(e))
+        return
+
+    if action == "menu_deputy_perms":
+        try:
+            from modules.admin_perms import deputy_list_menu
+            from database import get_all_deputies
+            cv = int(parts[2]) if len(parts) > 2 else chat_id
+            deputies_raw = get_all_deputies(cv) or []
+            deputies = []
+            for d in deputies_raw:
+                if isinstance(d, dict):
+                    deputies.append(d)
+                elif isinstance(d, (list, tuple)):
+                    deputies.append({'user_id': d[0] if len(d) > 0 else 0, 'name': d[1] if len(d) > 1 else 'معاون'})
+            kb = deputy_list_menu(clicker_id, cv, deputies)
+            await query.edit_message_text("🔐 دسترسی معاونین" + NL + NL + "یکی از معاونین را انتخاب کنید:", reply_markup=kb)
+        except Exception as e:
+            print("[DEPUTY_PERMS ERR] " + str(e))
+        return
+
+    if action == "aperm_user":
+        try:
+            from modules.admin_perms import perms_menu
+            target_id = int(parts[1])
+            cv = int(parts[3]) if len(parts) > 3 else chat_id
+            kb = perms_menu(clicker_id, cv, target_id, "admin")
+            await query.edit_message_text("👤 دسترسی‌های ادمین" + NL + NL + "برای تغییر، روی هر مورد بزنید:", reply_markup=kb)
+        except Exception as e:
+            print("[APERM_USER ERR] " + str(e))
+        return
+
+    if action == "dperm_user":
+        try:
+            from modules.admin_perms import perms_menu
+            target_id = int(parts[1])
+            cv = int(parts[3]) if len(parts) > 3 else chat_id
+            kb = perms_menu(clicker_id, cv, target_id, "deputy")
+            await query.edit_message_text("👤 دسترسی‌های معاون" + NL + NL + "برای تغییر، روی هر مورد بزنید:", reply_markup=kb)
+        except Exception as e:
+            print("[DPERM_USER ERR] " + str(e))
+        return
+
+    if action.startswith("aperm_tgl_"):
+        try:
+            from modules.admin_perms import perms_menu
+            from database import get_admin_perm, set_admin_perm
+            perm_name = action.replace("aperm_tgl_", "")
+            target_id = int(parts[1])
+            cv = int(parts[3]) if len(parts) > 3 else chat_id
+            cur = get_admin_perm(cv, target_id, perm_name)
+            set_admin_perm(cv, target_id, "admin", perm_name, 0 if cur else 1)
+            kb = perms_menu(clicker_id, cv, target_id, "admin")
+            await query.edit_message_reply_markup(reply_markup=kb)
+            await query.answer("✅ تغییر کرد")
+        except Exception as e:
+            print("[APERM_TGL ERR] " + str(e))
+        return
+
+    if action.startswith("dperm_tgl_"):
+        try:
+            from modules.admin_perms import perms_menu
+            from database import get_admin_perm, set_admin_perm
+            perm_name = action.replace("dperm_tgl_", "")
+            target_id = int(parts[1])
+            cv = int(parts[3]) if len(parts) > 3 else chat_id
+            cur = get_admin_perm(cv, target_id, perm_name)
+            set_admin_perm(cv, target_id, "deputy", perm_name, 0 if cur else 1)
+            kb = perms_menu(clicker_id, cv, target_id, "deputy")
+            await query.edit_message_reply_markup(reply_markup=kb)
+            await query.answer("✅ تغییر کرد")
+        except Exception as e:
+            print("[DPERM_TGL ERR] " + str(e))
+        return
+
+    if action == "aperm_list":
+        try:
+            from modules.admin_perms import get_group_admins_list, admin_list_menu
+            cv = int(parts[2]) if len(parts) > 2 else chat_id
+            admins = get_group_admins_list(cv)
+            kb = admin_list_menu(clicker_id, cv, admins)
+            await query.edit_message_text("🔐 دسترسی ادمین‌ها", reply_markup=kb)
+        except Exception as e:
+            print("[APERM_LIST ERR] " + str(e))
+        return
+
+    if action == "dperm_list":
+        try:
+            from modules.admin_perms import deputy_list_menu
+            from database import get_all_deputies
+            cv = int(parts[2]) if len(parts) > 2 else chat_id
+            deputies_raw = get_all_deputies(cv) or []
+            deputies = []
+            for d in deputies_raw:
+                if isinstance(d, dict):
+                    deputies.append(d)
+                elif isinstance(d, (list, tuple)):
+                    deputies.append({'user_id': d[0] if len(d) > 0 else 0, 'name': d[1] if len(d) > 1 else 'معاون'})
+            kb = deputy_list_menu(clicker_id, cv, deputies)
+            await query.edit_message_text("🔐 دسترسی معاونین", reply_markup=kb)
+        except Exception as e:
+            print("[DPERM_LIST ERR] " + str(e))
+        return
+    # ========== End Permissions ==========
+
+    if action == "sub_manage":
+        try:
+            ov = int(parts[1]) if len(parts) > 1 else clicker_id
+            cv = int(parts[2]) if len(parts) > 2 else 0
+            await query.edit_message_text("💳 مدیریت اشتراک‌ها" + chr(10) + chr(10) + "یکی از گزینه‌های زیر را انتخاب کنید:", reply_markup=sub_manage_menu(ov, cv))
+        except Exception as e:
+            print("[SUB_MANAGE ERR] " + str(e))
+        return
+
+    if action == "sub_status":
+        try:
+            ov = int(parts[1]) if len(parts) > 1 else clicker_id
+            cv = int(parts[2]) if len(parts) > 2 else 0
+            t, kb = sub_status_menu(ov, cv)
+            await query.edit_message_text(t, reply_markup=kb)
+        except Exception as e:
+            print("[SUB_STATUS ERR] " + str(e))
+        return
+
+    if action == "vcall_sub":
+        try:
+            ov = int(parts[1]) if len(parts) > 1 else clicker_id
+            cv = int(parts[2]) if len(parts) > 2 else 0
+            t, kb = vcall_sub_menu(ov, cv)
+            await query.edit_message_text(t, reply_markup=kb)
+        except Exception as e:
+            print("[VCALL_SUB ERR] " + str(e))
+        return
+
+    if action == "music_sub":
+        try:
+            ov = int(parts[1]) if len(parts) > 1 else clicker_id
+            cv = int(parts[2]) if len(parts) > 2 else 0
+            t, kb = music_sub_menu(ov, cv)
+            await query.edit_message_text(t, reply_markup=kb)
+        except Exception as e:
+            print("[MUSIC_SUB ERR] " + str(e))
+        return
+
+    if action.startswith("vcall_interval_"):
+        try:
+            minutes = int(action.replace("vcall_interval_", ""))
+            cv = int(parts[2]) if len(parts) > 2 else 0
+            from database import set_vcall_interval
+            set_vcall_interval(cv, minutes)
+            ov = int(parts[1]) if len(parts) > 1 else clicker_id
+            t, kb = vcall_sub_menu(ov, cv)
+            await query.edit_message_text(t, reply_markup=kb)
+            await query.answer("OK")
+        except Exception as e:
+            print("[VCALL_INTERVAL ERR] " + str(e))
+        return
+
+    owner_id = clicker_id
+    extra = None
+
+    if len(parts) >= 2:
+        try:
+            owner_id = int(parts[1])
+        except Exception:
+            owner_id = clicker_id
+    if len(parts) >= 3:
+        try:
+            extra = int(parts[2])
+        except Exception:
+            extra = None
+
+    if owner_id != 0 and clicker_id != owner_id:
+        await query.answer("این پنل توسط شما باز نشده!", show_alert=True)
+        return
+
+    await query.answer()
+
+    chat_id = query.message.chat_id
+    uid = clicker_id
+    msg_id = query.message.message_id
+
+    print("[CALLBACK] " + action)
+
+    # تشخیص نقش کاربر
+    is_sudo = is_bot_owner_or_sudo(uid)
+    is_gowner = False
+    try:
+        is_gowner = is_group_owner(chat_id, uid)
+    except Exception:
+        pass
+
+    if action == "menu_close":
+        try:
+            await query.message.delete()
+        except Exception:
+            try:
+                await query.edit_message_text("پنل بسته شد")
+            except Exception:
+                pass
+        return
+
+    # ============ op_back ============
+
+    if action == "op_back":
+        # آیدی گروه از parts[2] میاد
+        try:
+            group_chat = int(parts[2]) if len(parts) > 2 else chat_id
+        except Exception:
+            group_chat = chat_id
+        try:
+            # چک کنیم کاربر مالک گروه هست (با آیدی گروه واقعی)
+            is_gowner_check = False
+            try:
+                from database import is_group_owner as _igo
+                if _igo(group_chat, clicker_id):
+                    is_gowner_check = True
+            except Exception as e2:
+                print("[OP_BACK OWNER CHK ERR] " + str(e2))
+            if is_sudo:
+                await query.edit_message_text(
+                    "پنل مدیریت:",
+                    reply_markup=sudo_panel_menu(uid, group_chat)
+                )
+            elif is_gowner_check or is_gowner:
+                await query.edit_message_text(
+                    "پنل مالک گروه:",
+                    reply_markup=group_owner_panel_menu(uid, group_chat)
+                )
+            else:
+                print("[OP_BACK] neither sudo nor owner! clicker=" + str(clicker_id))
+            reset_timer(context, chat_id, msg_id)
+        except Exception as e:
+            print("[OP_BACK ERR] " + str(e))
+        return
+    if action == "op_manage":
+        target_chat = await _get_owner_group(clicker_id, chat_id, parts)
+        try:
+            await query.edit_message_text("👥 مدیریت گروه", reply_markup=owner_manage_menu(uid, target_chat))
+            reset_timer(context, chat_id, msg_id)
+        except Exception as e:
+            print("[OP_MANAGE ERR] " + str(e))
+        return
+
+    if action == "op_settings":
+        target_chat = await _get_owner_group(clicker_id, chat_id, parts)
+        try:
+            await query.edit_message_text("⚙️ تنظیمات گروه - بخش مورد نظر:", reply_markup=owner_settings_menu(uid, target_chat))
+            reset_timer(context, chat_id, msg_id)
+        except Exception as e:
+            print("[OP_SETTINGS ERR] " + str(e))
+        return
+
+    if action == "op_sub":
+        if not is_sudo:
+            await query.answer("فقط سازنده ربات", show_alert=True)
+            return
+        target_chat = extra if extra else chat_id
+        try:
+            await query.edit_message_text("مدیریت اشتراک گروه:", reply_markup=owner_sub_menu(uid, target_chat))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action == "op_sub_status":
+        if not is_sudo:
+            await query.answer("فقط سازنده ربات", show_alert=True)
+            return
+        target_chat = extra if extra else chat_id
+        expire = get_expire(target_chat)
+        if not expire:
+            text = "❌ گروه فعال نیست."
+        else:
+            try:
+                exp = datetime.strptime(expire, DATE_FMT)
+                if exp > datetime.now():
+                    remain = exp - datetime.now()
+                    text = "✅ اشتراک فعال" + NL + "انقضا: " + expire + NL + "باقی: " + str(remain.days) + " روز"
+                else:
+                    text = "❌ منقضی شده - " + expire
+            except Exception:
+                text = "تاریخ: " + expire
+        try:
+            await query.edit_message_text(text, reply_markup=owner_sub_menu(uid, target_chat))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action.startswith("op_sub_"):
+        if not is_sudo:
+            await query.answer("فقط سازنده ربات", show_alert=True)
+            return
+        target_chat = extra if extra else chat_id
+        if action == "op_sub_off":
+            update_group(target_chat, expire_date=None, activated=0)
+            try:
+                await query.edit_message_text(
+                    "❌ گروه غیرفعال شد.",
+                    reply_markup=owner_sub_menu(uid, target_chat)
+                )
+                reset_timer(context, chat_id, msg_id)
+            except Exception:
+                pass
+            return
+        try:
+            days = int(action.replace("op_sub_", ""))
+        except Exception:
+            return
+        expire = (datetime.now() + timedelta(days=days)).strftime(DATE_FMT)
+        update_group(target_chat, expire_date=expire, activated=1)
+        try:
+            await query.edit_message_text(
+                "✅ گروه برای " + str(days) + " روز تمدید شد." + NL +
+                "انقضا: " + expire,
+                reply_markup=owner_sub_menu(uid, target_chat)
+            )
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action == "op_botadmins":
+        if not is_sudo:
+            await query.answer("فقط سازنده ربات", show_alert=True)
+            return
+        target_chat = extra if extra else chat_id
+        try:
+            await query.edit_message_text(
+                "مدیریت ادمین های ربات:" + NL + NL +
+                "برای افزودن/حذف ادمین، توی پی وی ربات دستور بزن:" + NL +
+                "• ادمین ربات کن 123456789" + NL +
+                "• حذف ادمین ربات 123456789",
+                reply_markup=owner_botadmins_menu(uid, target_chat)
+            )
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action == "op_ba_list":
+        if not is_sudo:
+            await query.answer("فقط سازنده ربات", show_alert=True)
+            return
+        target_chat = extra if extra else chat_id
+        admins = get_all_bot_admins()
+        if not admins:
+            text = "📋 هنوز ادمین رباتی اضافه نشده."
+        else:
+            lines = []
+            for i, (bid, first_name, username, added_at) in enumerate(admins, 1):
+                uname = ("@" + username) if username else ""
+                lines.append(str(i) + ". " + (first_name or "بدون نام") + " " + uname + NL + "   ID: " + str(bid))
+            text = "📋 ادمین های ربات:" + NL + "━━━━━━━━━━━━━━━━━━" + NL + NL + (NL + NL).join(lines)
+        try:
+            await query.edit_message_text(text, reply_markup=owner_botadmins_menu(uid, target_chat))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action == "op_ba_help":
+        if not is_sudo:
+            await query.answer("فقط سازنده ربات", show_alert=True)
+            return
+        target_chat = extra if extra else chat_id
+        text = (
+            "مدیریت ادمین های ربات:" + NL + "━━━━━━━━━━━━━━━━━━" + NL + NL +
+            "روش 1 - با آیدی عددی (توی پی وی):" + NL +
+            "ادمین ربات کن 123456789" + NL +
+            "حذف ادمین ربات 123456789" + NL + NL +
+            "روش 2 - با فوروارد:" + NL +
+            "پیام کاربر رو فوروارد کن" + NL +
+            "روی اون ریپلای کن" + NL +
+            "بنویس: ادمین ربات کن" + NL + NL +
+            "دسترسی ادمین ربات:" + NL +
+            "• همه تنظیمات" + NL +
+            "• تمدید اشتراک" + NL +
+            "• تعیین مالک گروه" + NL +
+            "• ریستارت / پیکربندی" + NL +
+            "• افزودن ربات به گروه"
+        )
+        try:
+            await query.edit_message_text(text, reply_markup=owner_botadmins_menu(uid, target_chat))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action == "op_ownerguide":
+        text = (
+            "راهنما مالک ربات:" + NL + "━━━━━━━━━━━━━━━━━━" + NL + NL +
+            "توی پی وی ربات بنویس:" + NL +
+            "راهنما مالک" + NL + NL +
+            "راهنمای کامل 17 بخشی باز می شه."
+        )
+        try:
+            if is_sudo:
+                await query.edit_message_text(text, reply_markup=sudo_panel_menu(uid, chat_id))
+            elif is_gowner:
+                await query.edit_message_text(text, reply_markup=group_owner_panel_menu(uid, chat_id))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    # ============ منوی گروه (برای ادمین های معمولی) ============
+
+    if action == "menu_manage":
+        await query.edit_message_text("مدیریت - بخش مورد نظر:", reply_markup=group_manage_menu(uid))
+        reset_timer(context, chat_id, msg_id)
+        return
+
+    if action == "menu_settings":
+        try:
+            from database import is_group_owner, is_bot_admin
+            from config import OWNER_ID
+            cv = await _get_owner_group(clicker_id, chat_id, parts)
+            if clicker_id == OWNER_ID or is_bot_admin(clicker_id) or is_group_owner(cv, clicker_id):
+                await query.edit_message_text("⚙️ تنظیمات گروه - بخش مورد نظر:", reply_markup=owner_settings_menu(uid, cv))
+            else:
+                await query.edit_message_text("⚙️ تنظیمات گروه - بخش مورد نظر:", reply_markup=group_settings_menu(uid, cv))
+        except Exception as e:
+            print("[MENU_SETTINGS ERR] " + str(e))
+        reset_timer(context, chat_id, msg_id)
+        return
+    if action == "games_toggle":
+        try:
+            from database import get_setting, set_setting
+            cv = int(parts[2]) if len(parts) > 2 else chat_id
+            cur = get_setting(cv, "games_enabled", "1")
+            new_val = "0" if cur == "1" else "1"
+            set_setting(cv, "games_enabled", new_val)
+            await query.answer("✅ تغییر کرد")
+            await query.edit_message_reply_markup(reply_markup=owner_settings_menu(uid, cv))
+        except Exception as e:
+            print("[GAMES TOGGLE ERR] " + str(e))
+        return
+
+    if action == "invite_unban_toggle":
+        try:
+            from database import get_setting, set_setting
+            cv = int(parts[2]) if len(parts) > 2 else chat_id
+            cur = get_setting(cv, "invite_after_unban", "0")
+            new_val = "0" if cur == "1" else "1"
+            set_setting(cv, "invite_after_unban", new_val)
+            await query.answer("✅ تغییر کرد")
+            await query.edit_message_reply_markup(reply_markup=owner_settings_menu(uid, cv))
+        except Exception as e:
+            print("[INV TOGGLE ERR] " + str(e))
+            await query.answer("خطا: " + str(e)[:100], show_alert=True)
+        return
+
+    if action == "menu_back":
+        await query.edit_message_text("منوی اصلی - بخش مورد نظر:", reply_markup=group_panel_menu(uid))
+        reset_timer(context, chat_id, msg_id)
+        return
+
+    # ============ مدیریت (مشترک) ============
+
+    if action == "menu_status":
+        try:
+            member_count = await context.bot.get_chat_member_count(chat_id)
+        except Exception:
+            member_count = "?"
+        owner_count = 0
+        admin_count = 0
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            for a in admins:
+                if a.status == "creator":
+                    owner_count += 1
+                elif a.status == "administrator":
+                    admin_count += 1
+        except Exception:
+            pass
+        expire = get_expire(chat_id)
+        days_remain = "?"
+        if expire:
+            try:
+                exp = datetime.strptime(expire, "%Y-%m-%d %H:%M")
+                diff = exp - datetime.now()
+                days_remain = str(diff.days)
+            except Exception:
+                days_remain = "?"
+        total_joined = 0
+        try:
+            import sqlite3
+            from config import DATABASE_PATH
+            conn = sqlite3.connect(DATABASE_PATH)
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM members WHERE chat_id = ?", (chat_id,))
+            row = c.fetchone()
+            if row:
+                total_joined = row[0]
+            conn.close()
+        except Exception:
+            pass
+        text = ("وضعیت گروه" + NL + "━━━━━━━━━━━━━━━━━━" + NL +
+                "تعداد اعضا: " + str(member_count) + NL + "مدیران: " + str(admin_count) + NL +
+                "مالکین: " + str(owner_count) + NL + "مجموع وارد شده: " + str(total_joined) + NL +
+                "روز اعتبار: " + str(days_remain) + NL +
+                "اشتراک: " + ("فعال" if check_active(chat_id) else "غیرفعال"))
+        if is_sudo or is_gowner:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("بازگشت", callback_data="op_manage:" + str(uid) + ":" + str(chat_id))],
+                [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+            ])
+        else:
+            kb = back_manage_kb(uid)
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+
+    if action == "menu_owners":
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            owners = [a for a in admins if a.status == "creator"]
+            text = "صاحبان گروه:" + NL + NL
+            for o in owners:
+                name = o.user.first_name or "بدون نام"
+                uname = ("@" + o.user.username) if o.user.username else ""
+                text += "• " + name + " " + uname + NL
+            go = get_group_owner(chat_id)
+            if go:
+                text += NL + "👑 مالک تعیین شده:" + NL + "• " + (go[1] or "بدون نام") + NL + "  ID: " + str(go[0])
+        except Exception as e:
+            text = "خطا: " + str(e)
+        if is_sudo or is_gowner:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("بازگشت", callback_data="op_manage:" + str(uid) + ":" + str(chat_id))],
+                [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+            ])
+        else:
+            kb = back_manage_kb(uid)
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+
+    if action == "menu_admins":
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            text = "مدیران گروه:" + NL + NL
+            for a in admins:
+                name = a.user.first_name or "بدون نام"
+                uname = ("@" + a.user.username) if a.user.username else ""
+                role = "مالک" if a.status == "creator" else "مدیر"
+                text += "• " + name + " " + uname + " - " + role + NL
+        except Exception as e:
+            text = "خطا: " + str(e)
+        if is_sudo or is_gowner:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("بازگشت", callback_data="op_manage:" + str(uid) + ":" + str(chat_id))],
+                [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+            ])
+        else:
+            kb = back_manage_kb(uid)
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+
+    if action == "menu_vip":
+        vips = get_all_vips(chat_id)
+        if not vips:
+            text = "📋 هنوز عضو ویژه ای وجود نداره." + NL + NL + "برای اضافه کردن:" + NL + "روی پیام کاربر ریپلای کن" + NL + "و بنویس: تنظیم ویژه"
+        else:
+            lines = []
+            for i, (vuid, first_name, username, added_by, added_at, expire_at) in enumerate(vips, 1):
+                uname = ("@" + username) if username else ""
+                exp_label = "دائمی" if not expire_at else expire_at
+                lines.append(str(i) + ". " + (first_name or "بدون نام") + " " + uname + NL + "   انقضا: " + exp_label)
+            text = "📋 اعضای ویژه:" + NL + "━━━━━━━━━━━━━━━━━━" + NL + NL + (NL + NL).join(lines)
+        if is_sudo or is_gowner:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("بازگشت", callback_data="op_manage:" + str(uid) + ":" + str(chat_id))],
+                [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+            ])
+        else:
+            kb = back_manage_kb(uid)
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+
+    if action == "menu_deputies":
+        from database import get_all_deputies
+        deps = get_all_deputies(chat_id)
+        if not deps:
+            text = "📋 هنوز معاونی وجود نداره." + NL + NL + "برای اضافه کردن:" + NL + "روی پیام کاربر ریپلای کن" + NL + "و بنویس: معاون"
+        else:
+            lines = []
+            for i, (duid, first_name, username, added_by, added_at) in enumerate(deps, 1):
+                uname = ("@" + username) if username else ""
+                lines.append(str(i) + ". " + (first_name or "بدون نام") + " " + uname + NL + "   ID: " + str(duid))
+            text = "📋 معاونین گروه:" + NL + "━━━━━━━━━━━━━━━━━━" + NL + NL + (NL + NL).join(lines)
+        if is_sudo or is_gowner:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("بازگشت", callback_data="op_manage:" + str(uid) + ":" + str(chat_id))],
+                [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+            ])
+        else:
+            kb = back_manage_kb(uid)
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+
+    # ============ راهنما ============
+
+    if action == "menu_help":
+        txt = HELP_PAGES.get(1, "راهنما")
+        try:
+            await query.edit_message_text(txt, reply_markup=help_menu(uid, 1))
+        except Exception:
+            pass
+    if action.startswith("help_page_"):
+        page = int(action.replace("help_page_", ""))
+        txt = HELP_PAGES.get(page, "راهنما")
+        try:
+            await query.edit_message_text(txt, reply_markup=help_menu(uid, page))
+        except Exception:
+            pass
+        reset_timer(context, chat_id, msg_id)
+        return
+
+    if action == "set_lang_fa":
+        set_lang(chat_id, "fa")
+        kb = _safe_after_lang(uid, chat_id)
+        if kb:
+            await query.edit_message_text(t(chat_id, "lang_changed_fa"), reply_markup=kb)
+        else:
+            await query.edit_message_text("✅ زبان به فارسی تغییر کرد.")
+        return
+
+    if action == "set_lang_en":
+        set_lang(chat_id, "en")
+        kb = _safe_after_lang(uid, chat_id)
+        if kb:
+            await query.edit_message_text(t(chat_id, "lang_changed_en"), reply_markup=kb)
+        else:
+            await query.edit_message_text("✅ Language changed to English.")
+        return
+
+    # ============ پنل پی وی ============
+
+    if action == "pv_none":
+        try:
+            await query.edit_message_text("هنوز گروهی اضافه نشده.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("بستن", callback_data="menu_close:" + str(uid))]]))
+        except Exception:
+            pass
+        return
+
+    if action == "pv_back":
+        try:
+            await query.edit_message_text("پنل مالک ربات:" + NL + "گروه رو انتخاب کن:", reply_markup=pv_menu(uid))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action == "pv_chat":
+        target_chat = extra
+        title = str(target_chat)
+        try:
+            from database import get_all_bot_chats
+            for cid, t_name in get_all_bot_chats():
+                if cid == target_chat:
+                    title = t_name or str(cid)
+                    break
+        except Exception:
+            pass
+        text = "گروه: " + title + NL + NL + "گزینه:"
+        try:
+            await query.edit_message_text(text, reply_markup=pv_chat_menu(uid, target_chat))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action == "pvc_manage":
+        try:
+            await query.edit_message_text("مدیریت گروه:", reply_markup=group_manage_menu(uid))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+    if action == "pvc_settings":
+        target_chat = extra if extra else chat_id
+        try:
+            await query.edit_message_text("تنظیمات:", reply_markup=group_settings_menu(uid, target_chat))
+            reset_timer(context, chat_id, msg_id)
+        except Exception:
+            pass
+        return
+
+
+def register(app):
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("lang", lang_cmd))
+    app.add_handler(CommandHandler("rules", rules_cmd))
+    app.add_handler(CommandHandler("id", id_cmd))
+    app.add_handler(CommandHandler("restart", do_restart))
+    app.add_handler(CommandHandler("refresh", do_refresh))
+    app.add_handler(CommandHandler("config", do_refresh))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, persian_handler, block=False), group=7)
+    app.add_handler(CallbackQueryHandler(handler, pattern="^(menu_back|menu_manage|menu_settings|menu_status|menu_owners|menu_admins|menu_vip|menu_deputies|menu_help|menu_close|menu_admin_perms|menu_deputy_perms|aperm_|dperm_|invite_unban_toggle|games_toggle|forces_|help_page_|set_lang_|pv_|pvc_|op_|sub_|vcall_|music_|purge_|nsfw_|link_)"), group=1)

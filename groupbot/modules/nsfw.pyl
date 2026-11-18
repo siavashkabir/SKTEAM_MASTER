@@ -1,0 +1,289 @@
+import os
+import subprocess
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram.ext import MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from config import SIGHTENGINE_USER, SIGHTENGINE_SECRET
+from database import get_setting, set_setting, add_warn
+
+NL = chr(10)
+API_URL = "https://api.sightengine.com/1.0/check.json"
+MAX_WARNS = 4
+
+SENS_LABELS = {
+    "low": "کم",
+    "medium": "متوسط",
+    "high": "زیاد",
+}
+
+SENS_THRESHOLD = {
+    "low": 0.85,
+    "medium": 0.7,
+    "high": 0.5,
+}
+
+
+def get_sensitivity(chat_id):
+    return get_setting(chat_id, "nsfw_sensitivity", "medium")
+
+
+def get_threshold(chat_id):
+    sens = get_sensitivity(chat_id)
+    return SENS_THRESHOLD.get(sens, 0.7)
+
+
+def is_enabled(chat_id):
+    val = get_setting(chat_id, "nsfw_enabled", "1")
+    return val == "1"
+
+
+def set_enabled(chat_id, enabled):
+    set_setting(chat_id, "nsfw_enabled", "1" if enabled else "0")
+
+
+def build_nsfw_menu(uid, chat_id):
+    enabled = is_enabled(chat_id)
+    sens = get_sensitivity(chat_id)
+    sens_label = SENS_LABELS.get(sens, "متوسط")
+    status = "روشن" if enabled else "خاموش"
+    status_emoji = "[ON]" if enabled else "[OFF]"
+
+    def sens_label_mark(key):
+        if sens == key:
+            return "(x) " + SENS_LABELS[key]
+        return SENS_LABELS[key]
+
+    keyboard = [
+        [InlineKeyboardButton(status_emoji + " وضعیت فیلتر: " + status, callback_data="nsfw_toggle:" + str(uid) + ":" + str(chat_id))],
+        [InlineKeyboardButton("حساسیت فعلی: " + sens_label, callback_data="nsfw_noop:" + str(uid) + ":" + str(chat_id))],
+        [
+            InlineKeyboardButton(sens_label_mark("low"), callback_data="nsfw_sens_low:" + str(uid) + ":" + str(chat_id)),
+            InlineKeyboardButton(sens_label_mark("medium"), callback_data="nsfw_sens_medium:" + str(uid) + ":" + str(chat_id)),
+            InlineKeyboardButton(sens_label_mark("high"), callback_data="nsfw_sens_high:" + str(uid) + ":" + str(chat_id)),
+        ],
+        [InlineKeyboardButton("بازگشت", callback_data="menu_settings:" + str(uid))],
+        [InlineKeyboardButton("بستن پنل", callback_data="menu_close:" + str(uid))],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def convert_to_jpg(input_path, output_path):
+    try:
+        cmd = ["ffmpeg", "-y", "-i", input_path, "-vframes", "1", "-q:v", "2", output_path]
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+        if result.returncode == 0 and os.path.exists(output_path):
+            return True
+        print("[FFMPEG ERR] " + result.stderr.decode()[:200])
+        return False
+    except Exception as e:
+        print("[FFMPEG EXC] " + str(e))
+        return False
+
+
+async def mute_user(chat, user_id):
+    try:
+        await chat.restrict_member(
+            user_id=user_id,
+            permissions=ChatPermissions(can_send_messages=False)
+        )
+        return True
+    except Exception as e:
+        print("[MUTE ERR] " + str(e))
+        return False
+
+
+async def check_nsfw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    if not is_enabled(chat.id):
+        return
+
+    has_media = msg.photo or msg.animation or msg.video or msg.sticker or msg.document
+    if not has_media:
+        return
+
+    if msg.document:
+        mime = msg.document.mime_type or ""
+        if not (mime.startswith("image/") or mime.startswith("video/")):
+            return
+
+    try:
+        member = await chat.get_member(msg.from_user.id)
+        if member.status in ("administrator", "creator"):
+            return
+    except Exception:
+        pass
+
+    file_id = None
+    if msg.photo:
+        file_id = msg.photo[-1].file_id
+    elif msg.animation:
+        file_id = msg.animation.file_id
+    elif msg.video:
+        file_id = msg.video.file_id
+    elif msg.sticker:
+        file_id = msg.sticker.file_id
+    elif msg.document:
+        file_id = msg.document.file_id
+
+    if not file_id:
+        return
+
+    threshold = get_threshold(chat.id)
+
+    temp_input = None
+    temp_jpg = None
+    try:
+        file = await context.bot.get_file(file_id)
+        real_path = file.file_path or ""
+        ext = os.path.splitext(real_path)[1] or ".bin"
+
+        os.makedirs("downloads", exist_ok=True)
+        temp_input = "downloads/nsfw_in_" + str(file_id) + ext
+        temp_jpg = "downloads/nsfw_out_" + str(file_id) + ".jpg"
+
+        await file.download_to_drive(custom_path=temp_input)
+        print("[NSFW] downloaded size=" + str(os.path.getsize(temp_input)))
+
+        ext_low = ext.lower()
+        if ext_low in (".jpg", ".jpeg", ".png"):
+            temp_jpg = temp_input
+        else:
+            ok = convert_to_jpg(temp_input, temp_jpg)
+            if not ok:
+                print("[NSFW] convert failed")
+                return
+            print("[NSFW] converted size=" + str(os.path.getsize(temp_jpg)))
+
+        with open(temp_jpg, "rb") as f:
+            files = {"media": f}
+            data = {
+                "models": "nudity-2.1",
+                "api_user": SIGHTENGINE_USER,
+                "api_secret": SIGHTENGINE_SECRET,
+            }
+            response = requests.post(API_URL, files=files, data=data, timeout=30)
+
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("status") == "success":
+                nudity = result.get("nudity", {})
+                sexual_activity = nudity.get("sexual_activity", 0)
+                sexual_display = nudity.get("sexual_display", 0)
+                erotica = nudity.get("erotica", 0)
+                print("[NSFW] scores: act=" + str(sexual_activity) + " disp=" + str(sexual_display) + " ero=" + str(erotica) + " threshold=" + str(threshold))
+
+                if sexual_activity > threshold or sexual_display > threshold or erotica > threshold:
+                    try:
+                        await msg.delete()
+                        print("[NSFW] DELETED")
+                    except Exception as e:
+                        print("[NSFW DEL ERR] " + str(e))
+
+                    # اخطار
+                    count = add_warn(chat.id, msg.from_user.id)
+                    name = msg.from_user.first_name or "کاربر"
+
+                    if count >= MAX_WARNS:
+                        ok = await mute_user(chat, msg.from_user.id)
+                        if ok:
+                            await context.bot.send_message(
+                                chat_id=chat.id,
+                                text="🚫 " + name + " عزیز، به دلیل ارسال محتوای نامناسب و دریافت " + str(count) + " اخطار، به صورت دائم سکوت شدید."
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=chat.id,
+                                text="⚠️ " + name + " عزیز، محتوای نامناسب حذف شد. اخطار " + str(count) + " از " + str(MAX_WARNS)
+                            )
+                    else:
+                        remain = MAX_WARNS - count
+                        await context.bot.send_message(
+                            chat_id=chat.id,
+                            text="⚠️ " + name + " عزیز، ارسال محتوای نامناسب ممنوع است." + NL +
+                                 "اخطار " + str(count) + " از " + str(MAX_WARNS) + " - " + str(remain) + " اخطار تا سکوت دائم"
+                        )
+                else:
+                    print("[NSFW] safe")
+            else:
+                print("[NSFW API] " + str(result)[:200])
+        else:
+            print("[NSFW HTTP] " + str(response.status_code))
+
+    except Exception as e:
+        print("[NSFW ERR] " + str(e))
+    finally:
+        for p in [temp_input, temp_jpg]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+
+async def nsfw_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    clicker = query.from_user.id
+
+    parts = data.split(":")
+    action = parts[0]
+    owner = int(parts[1]) if len(parts) > 1 else clicker
+    chat_id = int(parts[2]) if len(parts) > 2 else query.message.chat_id
+
+    if clicker != owner:
+        await query.answer("این منو برای شما نیست", show_alert=True)
+        return
+
+    if action == "nsfw_noop":
+        await query.answer()
+        return
+
+    if action == "nsfw_toggle":
+        current = is_enabled(chat_id)
+        new_state = not current
+        set_enabled(chat_id, new_state)
+        status = "روشن" if new_state else "خاموش"
+        await query.answer("وضعیت فیلتر: " + status)
+        try:
+            await query.edit_message_reply_markup(reply_markup=build_nsfw_menu(owner, chat_id))
+        except Exception as e:
+            print("[NSFW CB TOGGLE ERR] " + str(e))
+        return
+
+    if action.startswith("nsfw_sens_"):
+        sens = action.replace("nsfw_sens_", "")
+        if sens in SENS_LABELS:
+            set_setting(chat_id, "nsfw_sensitivity", sens)
+            await query.answer("حساسیت: " + SENS_LABELS[sens])
+            try:
+                await query.edit_message_reply_markup(reply_markup=build_nsfw_menu(owner, chat_id))
+            except Exception as e:
+                print("[NSFW CB SENS ERR] " + str(e))
+        return
+
+    if action == "nsfw_menu":
+        await query.answer()
+        try:
+            await query.edit_message_text("تنظیمات فیلتر پورن:", reply_markup=build_nsfw_menu(owner, chat_id))
+        except Exception as e:
+            print("[NSFW CB MENU ERR] " + str(e))
+        return
+
+
+def register(app):
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO | filters.ANIMATION | filters.VIDEO | filters.Sticker.ALL | filters.Document.ALL,
+            check_nsfw,
+            block=False
+        ),
+        group=20
+    )
+    app.add_handler(CallbackQueryHandler(nsfw_cb_handler, pattern="^nsfw_"))

@@ -1,0 +1,104 @@
+======================================================================
+🔍 ریشه‌یابی باگ PANEL PV ERR
+======================================================================
+
+✅ 1 مورد پیدا شد:
+   📄 reply.py:414  →  print("[PANEL PV ERR] " + str(e))
+
+======================================================================
+🎯 Context کامل
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+🔧 تابع: reply_handler() | reply.py:365
+🎯 خطا در خط 414
+──────────────────────────────────────────────────────────────────────
+
+  365  | async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  366  |     msg = update.effective_message
+  367  |     chat = update.effective_chat
+  368  |     user = update.effective_user
+  369  |     if not msg or not chat or not user:
+  370  |         return
+  371  | 
+  372  |     text = msg.text or ""
+  373  |     if not text:
+  374  |         return
+  375  | 
+  376  |     print("[MSG] " + text)
+  377  | 
+  378  |     if chat.type == "private":
+  379  |         return
+  380  | 
+  381  |     if chat.type not in ("group", "supergroup"):
+  382  |         return
+  383  | 
+  384  |     t_low = text.lower().strip()
+  385  |     t_norm = normalize(text)
+  386  |     bot_username = (context.bot.username or "").lower()
+  387  |     is_mentioned = ("@" + bot_username) in t_low
+  388  | 
+  389  |     # پنل پی وی
+  390  |     pv_triggers_norm = ["پنلپیوی", "پنلpv", "panelpv", "پنلخصوصی", "panelprivate"]
+  391  |     if t_norm in pv_triggers_norm:
+  392  |         try:
+  393  |             is_creator = False
+  394  |             try:
+  395  |                 m = await chat.get_member(user.id)
+  396  |                 if m.status == "creator":
+  397  |                     is_creator = True
+  398  |             except Exception:
+  399  |                 pass
+  400  |             allowed = (user.id == OWNER_ID) or is_bot_admin(user.id) or is_creator or is_group_owner(chat.id, user.id)
+  401  |             if not allowed:
+  402  |                 return
+  403  |             bot_username_clean = BOT_USERNAME.replace("@", "")
+  404  |             url = "https://t.me/" + bot_username_clean + "?start=pv_" + str(chat.id)
+  405  |             kb = InlineKeyboardMarkup([
+  406  |                 [InlineKeyboardButton("دریافت پنل در پی وی", url=url)],
+  407  |             ])
+  408  |             await msg.reply_text(
+  409  |                 "برای دریافت پنل در پی وی، روی دکمه زیر بزنید:" + NL + NL +
+  410  |                 "پنل شامل مدیریت و تنظیمات این گروهه.",
+  411  |                 reply_markup=kb
+  412  |             )
+  413  |         except Exception as e:
+  414 ★|             print("[PANEL PV ERR] " + str(e))
+  415  |         return
+  416  | 
+  417  |     # پنل - تشخیص دقیق نقش
+  418  |     if t_norm in ("پنل", "panel"):
+  419  |         # [PER-USER PANEL GUARD] بستن پنل قدیمی + باز کردن پنل جدید
+  420  |         try:
+  421  |             from modules.start import ACTIVE_PANELS
+  422  |             _key = (user.id, chat.id)
+  423  |             _old_panel = ACTIVE_PANELS.pop(_key, None)
+  424  |             if _old_panel:
+  425  |                 print(f"[PANEL GUARD] Deleting old panel msg={_old_panel} for user {user.id}")
+  426  |                 try:
+  427  |                     await context.bot.delete_message(chat_id=chat.id, message_id=_old_panel)
+  428  |                 except Exception as _de:
+  429  |                     print(f"[PANEL GUARD] Old panel already deleted: {_de}")
+  430  |                 # فقط در این حالت، پیام "پنل" کاربر هم پاک میشه
+  431  |                 try:
+  432  |                     await msg.delete()
+  433  |                 except Exception:
+  434  |                     pass
+  435  |         except Exception as _e:
+  436  |             print("[PANEL GUARD ERR] " + str(_e))
+  437  | 
+  438  |         # تشخیص نقش
+  439  |         is_sudo_user = False
+  440  |         try:
+  441  |             if user.id == OWNER_ID:
+  442  |                 is_sudo_user = True
+  443  |             elif is_bot_admin(user.id):
+  444  |                 is_sudo_user = True
+
+======================================================================
+🔍 جستجوی OWNER_ID و import داخل تابع
+======================================================================
+
+📄 reply.py — تابع از خط 365:
+
+    400 |             allowed = (user.id == OWNER_ID) or is_bot_admin(user.id) or is_creator or is_group_owner(chat.id, user.id)

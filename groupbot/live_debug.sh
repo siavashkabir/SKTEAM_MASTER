@@ -1,0 +1,13 @@
+#!/data/data/com.termux/files/usr/bin/bash
+echo "🔍 لاگ زنده - همه کالبک‌ها و handlerها"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "📱 در تلگرام این کارها رو انجام بده:"
+echo "   1. با اکانت مالک گروه → پنل"
+echo "   2. روی «🔧 بخش سازنده» کلیک کن (اگه هست)"
+echo "   3. برگرد و روی بازگشت بزن"
+echo ""
+echo "🛑 برای خروج: Ctrl+C"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+tail -f ~/groupbot_bot.log | grep --line-buffered -E "HANDLER DEBUG|CALLBACK|ERR|Traceback|SECTION|SUDO|PERM|OWNER|panel|section|back|op_|menu_"

@@ -1,0 +1,759 @@
+#!/usr/bin/env python3
+"""Sk.Media Player — clean rewrite"""
+import asyncio, os, sys, json, time, hashlib, traceback, subprocess
+from pathlib import Path
+import httpx
+from pyrogram import Client
+from pytgcalls import PyTgCalls
+from pytgcalls.types import MediaStream, AudioQuality, Update
+import yt_dlp
+import recorder as _rec
+
+API_ID = int(os.environ["TG_API_ID"])
+API_HASH = os.environ["TG_API_HASH"]
+SESSION = os.environ["TG_SESSION_STRING"]
+SERVER = os.environ.get("SK_SERVER", "http://127.0.0.1:8080")
+
+CACHE = Path("/root/sk_media/cache")
+CACHE.mkdir(parents=True, exist_ok=True)
+LOGO = "/root/sk_media/assets/logo_500.jpg"
+STATE_FILE = "/root/sk_media/.state.json"
+POLL_SEC = 2
+POS_SEC = 5
+
+def log(*a):
+    sys.stderr.write(" ".join(str(x) for x in a) + "\n")
+    sys.stderr.flush()
+
+# ═══════════════════════════════════════════════
+# State save/load
+# ═══════════════════════════════════════════════
+def _save_state(cid, title, src, dur, orig=None):
+    try:
+        d = {}
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE) as f: d = json.load(f)
+        d[str(cid)] = {"title": title, "src": src, "dur": dur, "orig": orig or src}
+        with open(STATE_FILE, "w") as f: json.dump(d, f)
+    except Exception as e:
+        log(f"[state] save err: {e}")
+
+def _load_state(cid):
+    try:
+        if not os.path.exists(STATE_FILE): return None
+        with open(STATE_FILE) as f: d = json.load(f)
+        return d.get(str(cid))
+    except: return None
+
+def _clear_state(cid):
+    try:
+        if not os.path.exists(STATE_FILE): return
+        with open(STATE_FILE) as f: d = json.load(f)
+        d.pop(str(cid), None)
+        with open(STATE_FILE, "w") as f: json.dump(d, f)
+    except: pass
+
+# ═══════════════════════════════════════════════
+# ID3 tags
+# ═══════════════════════════════════════════════
+def set_id3(path, title):
+    try:
+        from mutagen.mp3 import MP3
+        from mutagen.id3 import TIT2, TPE1, TALB, COMM, APIC
+        a = MP3(path)
+        if a.tags is None: a.add_tags()
+        for k in ("TIT2","TPE1","TALB","COMM","APIC"):
+            try: a.tags.delall(k)
+            except: pass
+        a.tags["TIT2"] = TIT2(encoding=3, text=title[:200])
+        a.tags["TPE1"] = TPE1(encoding=3, text="Sk.Team")
+        a.tags["TALB"] = TALB(encoding=3, text="Sk.Team Music Player")
+        a.tags["COMM"] = COMM(encoding=3, lang="eng", desc="", text="@SkTeamMusic_Bot")
+        if os.path.exists(LOGO):
+            with open(LOGO, "rb") as fp:
+                a.tags["APIC"] = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=fp.read())
+        a.save()
+        return True
+    except Exception as e:
+        log(f"[id3] err: {e}")
+        return False
+
+# ═══════════════════════════════════════════════
+# Download از SoundCloud
+# ═══════════════════════════════════════════════
+def clean_query(q):
+    q = (q or "").strip()
+    for p in ("ytsearch1:","ytsearch2:","ytsearch:","scsearch1:","scsearch2:","scsearch:"):
+        if q.startswith(p): q = q[len(p):].strip(); break
+    return q
+
+def _dl_one(final, q):
+    """یه بار دانلود از یه منبع"""
+    key = hashlib.md5(final.encode()).hexdigest()[:16]
+    out = str(CACHE / key)
+    _ck = "/root/sk_media/cookies_yt.txt"
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": out,
+        "quiet": True, "no_warnings": True, "noplaylist": True,
+        "external_downloader": "aria2c",
+        "external_downloader_args": {"aria2c": ["-x","16","-s","16","-k","1M","--summary-interval=0"]},
+        "concurrent_fragment_downloads": 16,
+        "postprocessors": [{"key":"FFmpegExtractAudio","preferredcodec":"mp3","preferredquality":"96"}],
+    }
+    if os.path.exists(_ck):
+        opts["cookiefile"] = _ck
+        opts["age_limit"] = 99
+        opts["nocheckcertificate"] = True
+        opts["geo_bypass"] = True
+        opts["geo_bypass_country"] = "DE"
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(final, download=True)
+        if "entries" in info: info = info["entries"][0]
+        path = ydl.prepare_filename(info)
+        p = Path(path)
+        if not p.exists(): p = p.with_suffix(".mp3")
+        return str(p), info.get("title", q), info.get("duration", 0)
+
+
+def download(query):
+    """★ Multi-source: SoundCloud → YouTube → SoundCloud (بیشتر)"""
+    q = clean_query(query)
+    log(f"[dl] query={q!r}")
+
+    # اگه کاربر خودش پیشوند داده، همون رو استفاده کن
+    if q.startswith(("scsearch", "ytsearch")):
+        sources = [q]
+    else:
+        sources = [
+            f"scsearch1:{q}",     # ۱. SoundCloud
+            f"ytsearch1:{q}",     # ۲. YouTube (با کوکی)
+            f"scsearch3:{q}",     # ۳. SoundCloud بیشتر
+            f"ytsearch3:{q}",     # ۴. YouTube بیشتر
+        ]
+
+    last_err = None
+    for final in sources:
+        try:
+            log(f"[dl] try {final.split(':')[0]}")
+            result = _dl_one(final, q)
+            log(f"[dl] ✅ OK via {final.split(':')[0]}")
+            return result
+        except Exception as e:
+            last_err = e
+            log(f"[dl] ❌ FAIL {final.split(':')[0]}: {str(e)[:150]}")
+            continue
+
+    raise Exception(f"all sources failed: {last_err}")
+
+# ═══════════════════════════════════════════════
+# process_audio (ffmpeg - EQ / speed / seek)
+# ═══════════════════════════════════════════════
+EQ_MAP = {
+    "rock":    "equalizer=f=80:t=q:w=1:g=4,equalizer=f=200:t=q:w=1:g=2,equalizer=f=800:t=q:w=1:g=-1,equalizer=f=2500:t=q:w=1:g=3,equalizer=f=6000:t=q:w=1:g=3,volume=0.85",
+    "jazz":    "equalizer=f=80:t=q:w=1:g=3,equalizer=f=400:t=q:w=1:g=2,equalizer=f=1500:t=q:w=1:g=-1,equalizer=f=3500:t=q:w=1:g=2,equalizer=f=8000:t=q:w=1:g=3,volume=0.85",
+    "pop":     "equalizer=f=80:t=q:w=1:g=-2,equalizer=f=1000:t=q:w=1:g=3,equalizer=f=3000:t=q:w=1:g=3,equalizer=f=8000:t=q:w=1:g=2,volume=0.85",
+    "classic": "equalizer=f=80:t=q:w=1:g=3,equalizer=f=300:t=q:w=1:g=1,equalizer=f=1500:t=q:w=1:g=-2,equalizer=f=3000:t=q:w=1:g=-1,equalizer=f=8000:t=q:w=1:g=2,volume=0.85",
+    "bass":    "equalizer=f=60:t=q:w=1:g=6,equalizer=f=120:t=q:w=1:g=4,equalizer=f=250:t=q:w=1:g=2,volume=0.8",
+    "treble":  "equalizer=f=3000:t=q:w=1:g=4,equalizer=f=6000:t=q:w=1:g=5,equalizer=f=10000:t=q:w=1:g=3,volume=0.85",
+    "vocal":   "equalizer=f=200:t=q:w=2:g=-4,equalizer=f=800:t=q:w=1:g=1,equalizer=f=2500:t=q:w=2:g=4,equalizer=f=5000:t=q:w=1:g=3,volume=0.9",
+    "3d":      "aecho=0.8:0.85:40|80:0.35|0.25,extrastereo=m=1.8,volume=0.85",
+    "wide":    "extrastereo=m=2.5,volume=0.9",
+    "night":   "equalizer=f=60:t=q:w=1:g=4,equalizer=f=8000:t=q:w=1:g=-4,volume=0.8",
+    "day":     "equalizer=f=8000:t=q:w=1:g=3,equalizer=f=60:t=q:w=1:g=2,volume=0.95",
+    "silent":  "volume=0.25",
+    "heavy":   "equalizer=f=60:t=q:w=1:g=6,equalizer=f=150:t=q:w=1:g=4,equalizer=f=1000:t=q:w=1:g=-2,equalizer=f=3000:t=q:w=1:g=2,volume=0.8",
+    "dance":   "equalizer=f=80:t=q:w=1:g=5,equalizer=f=250:t=q:w=1:g=2,equalizer=f=1500:t=q:w=1:g=-1,equalizer=f=5000:t=q:w=1:g=3,volume=0.85",
+    "hiphop":  "equalizer=f=60:t=q:w=1:g=5,equalizer=f=120:t=q:w=1:g=3,equalizer=f=3000:t=q:w=1:g=2,volume=0.85",
+    "acoustic":"equalizer=f=80:t=q:w=1:g=2,equalizer=f=1500:t=q:w=1:g=1,equalizer=f=6000:t=q:w=1:g=3,volume=0.9",
+}
+
+def process_audio(src, tag, seek=0, speed=1.0, eq=None):
+    """رندر مجدد — -ss بعد از -i برای MP3 دقیق"""
+    import subprocess as _sp, time as _t
+    out = str(CACHE / f"p_{int(_t.time())}_{tag}.mp3")
+    # ★ -i اول، بعد -ss (accurate seek برای MP3)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src]
+    if seek and seek > 0:
+        cmd += ["-ss", str(int(seek))]
+    filters = []
+    if eq and eq in EQ_MAP:
+        filters.append(EQ_MAP[eq])
+    if speed and abs(float(speed) - 1.0) > 0.01:
+        s = max(0.5, min(2.0, float(speed)))
+        filters.append(f"atempo={s}")
+    if filters:
+        cmd += ["-af", ",".join(filters)]
+    cmd += ["-c:a", "libmp3lame", "-b:a", "96k", out]
+    log(f"[proc] seek={seek}s speed={speed} eq={eq}")
+    try:
+        _sp.run(cmd, check=True, capture_output=True, timeout=180)
+    except _sp.CalledProcessError as e:
+        err = (e.stderr or b"").decode()[:300]
+        log(f"[proc] FAIL: {err}")
+        raise
+    # ★ ffprobe برای مدت دقیق
+    dur = 0
+    try:
+        rr = _sp.run(["ffprobe","-v","quiet","-show_entries","format=duration",
+                      "-of","csv=p=0", out], capture_output=True, text=True, timeout=10)
+        dur = int(float(rr.stdout.strip()))
+    except:
+        try:
+            from mutagen.mp3 import MP3
+            dur = int(MP3(out).info.length)
+        except: dur = 0
+    log(f"[proc] ✅ dur={dur}s")
+    return out, dur
+
+# ═══════════════════════════════════════════════
+# PLAY_STATE
+# ═══════════════════════════════════════════════
+PLAY_STATE = {}
+
+def cancel_tasks(state):
+    """تمام task های در حال اجرا رو cancel کن"""
+    for k in ("_pos_task", "_sched_task"):
+        t = state.get(k)
+        if t and not t.done():
+            try: t.cancel()
+            except: pass
+
+
+def start_tasks(h, cid, calls, state, dur):
+    """شروع pos_loop + sched_next"""
+    cancel_tasks(state)
+    state["_pos_task"] = asyncio.create_task(pos_loop(h, cid, state))
+    state["_sched_task"] = asyncio.create_task(sched_next(h, cid, calls, dur))
+
+
+def cur_pos(state):
+    """position = base_pos + elapsed"""
+    if not state.get("active"): return 0
+    base = int(state.get("base_pos", 0) or 0)
+    if not state.get("playing"):
+        return base + int(state.get("position", 0) or 0)
+    started = state.get("started_at", time.time())
+    elapsed = max(0, int(time.time() - started))
+    return base + elapsed
+
+
+
+async def pos_loop(h, cid, state):
+    log(f"[pos_loop] start {cid}")
+    try:
+        while state.get("active"):
+            try:
+                pos = cur_pos(state)
+                dur = int(state.get("duration", 0) or 0)
+                if dur > 0 and pos > dur: pos = dur
+                log(f"[POS] {pos}s / {dur}s")
+                await h.post(f"{SERVER}/position", json={
+                    "chat_id": cid, "position": pos, "duration": dur,
+                    "paused": not state.get("playing", False),
+                    "speed": state.get("speed", 1.0),
+                    "volume": state.get("volume", 100),
+                    "repeat": state.get("repeat", "off"),
+                    "shuffle": state.get("shuffle", False),
+                })
+            except Exception as e:
+                log(f"[pos] err: {e}")
+            await asyncio.sleep(POS_SEC)
+    finally:
+        log(f"[pos_loop] stop {cid}")
+
+# ═══════════════════════════════════════════════
+# queue next
+# ═══════════════════════════════════════════════
+async def qnext(h, cid):
+    try:
+        r = await h.get(f"{SERVER}/queue/next", params={"chat_id": cid})
+        return r.json().get("next")
+    except: return None
+
+# ═══════════════════════════════════════════════
+# schedule next track
+# ═══════════════════════════════════════════════
+async def sched_next(h, cid, calls, dur):
+    try:
+        await asyncio.sleep(dur + 2)
+        key = str(cid)
+        state = PLAY_STATE.get(key, {})
+        if not state.get("active"): return
+        nxt = await qnext(h, cid)
+        if nxt:
+            log(f"[auto-next] {nxt['query']}")
+            await handle({"action":"play","chat_id":cid,"query":nxt["query"],
+                          "requested_by":nxt.get("requested_by"),
+                          "requested_by_name":nxt.get("requested_by_name","")}, calls, h)
+        elif state.get("repeat") == "one":
+            log(f"[repeat one] replay")
+            state["started_at"] = time.time()
+            state["active"] = True
+            state["playing"] = True
+            src = state.get("src_path")
+            if src and os.path.exists(src):
+                stream = MediaStream(src, audio_parameters=AudioQuality.HIGH,
+                                     video_flags=MediaStream.Flags.IGNORE)
+                try: await calls.play(cid, stream)
+                except: pass
+        else:
+            log(f"[auto-next] queue empty → stop")
+            state["active"] = False
+            state["playing"] = False
+            try: await calls.leave_call(cid)
+            except: pass
+            PLAY_STATE.pop(key, None)
+            _clear_state(cid)
+            try:
+                await h.post(f"{SERVER}/status", json={"chat_id":cid,"status":"stopped","id":"auto"})
+            except: pass
+    except Exception as e:
+        log(f"[sched] err: {e}")
+
+# ═══════════════════════════════════════════════
+# handle command
+# ═══════════════════════════════════════════════
+async def handle(cmd, calls, h):
+    action = (cmd.get("action") or "").lower()
+    cid = int(cmd.get("chat_id", 0))
+    key = str(cid)
+    log(f"[cmd] {action} {cid}")
+
+    async def report(st, **kw):
+        try:
+            await h.post(f"{SERVER}/status", json={"id": cmd.get("id"), "chat_id": cid, "status": st, **kw})
+        except: pass
+
+    # ─── PLAY ───
+    if action in ("play", "play_next"):
+        q = cmd.get("query") or cmd.get("url") or cmd.get("title")
+        if not q:
+            await report("error", error="no query"); return
+        # ★ اگه رکورد فعاله → pause
+        try:
+            st = _rec.STATE.get(cid, {})
+            if st.get("enabled") and not st.get("_paused"):
+                log(f"[rec] pause due to play")
+                await _rec.stop_rec(calls, cid, pause_only=True)
+        except Exception as e:
+            log(f"[rec] pause err: {e}")
+        # ★ LOCAL | FILE |
+        is_local = q.startswith("LOCAL|")
+        if is_local:
+            parts = q.split("|", 2)
+            if len(parts) < 3:
+                await report("error", error="bad local"); return
+            src_path = parts[1]
+            title = parts[2]
+            log(f"[play] local={src_path}")
+            if not os.path.exists(src_path):
+                await report("error", error=f"not found: {src_path}"); return
+            await report("joining", title=title, duration=0, position=0)
+            try:
+                # copy به cache + ID3
+                import shutil
+                dst = CACHE / Path(src_path).name
+                if not dst.exists(): shutil.copy2(src_path, str(dst))
+                try:
+                    from mutagen.mp3 import MP3
+                    dur = int(MP3(str(dst)).info.length)
+                except: dur = 0
+                try: set_id3(str(dst), title)
+                except: pass
+                stream = MediaStream(str(dst), audio_parameters=AudioQuality.HIGH,
+                                     video_flags=MediaStream.Flags.IGNORE)
+                if key in PLAY_STATE and PLAY_STATE[key].get("active"):
+                    await calls.change_stream(cid, stream)
+                else:
+                    await calls.play(cid, stream)
+                PLAY_STATE[key] = {
+                    "active": True, "playing": True, "paused": False,
+                    "started_at": time.time(), "base_pos": 0, "duration": dur,
+                    "title": title, "position": 0,
+                    "speed": 1.0, "repeat": "off", "shuffle": False,
+                    "volume": 100, "eq": None,
+                    "src_path": str(dst), "original_path": str(dst),
+                }
+                _save_state(cid, title, str(dst), dur)
+                start_tasks(h, cid, calls, PLAY_STATE[key], dur)
+                await report("playing", title=title, duration=dur, position=0)
+                log(f"[play] ✅ {title}")
+            except Exception as e:
+                log(f"[play] err: {e}"); log(traceback.format_exc())
+                await report("error", error=str(e))
+            return
+        # ─── download از SoundCloud ───
+        await report("joining", title=q, duration=0, position=0)
+        try:
+            path, title, dur = await asyncio.to_thread(download, q)
+            try: set_id3(path, title)
+            except: pass
+        except Exception as e:
+            log(f"[play] dl err: {e}")
+            await report("error", error=f"download: {e}")
+            return
+        try:
+            stream = MediaStream(path, audio_parameters=AudioQuality.HIGH,
+                                 video_flags=MediaStream.Flags.IGNORE)
+            if key in PLAY_STATE and PLAY_STATE[key].get("active"):
+                await calls.change_stream(cid, stream)
+            else:
+                await calls.play(cid, stream)
+            PLAY_STATE[key] = {
+                "active": True, "playing": True, "paused": False,
+                "started_at": time.time(), "duration": dur,
+                "title": title, "position": 0,
+                "speed": 1.0, "repeat": "off", "shuffle": False,
+                "volume": 100, "eq": None,
+                "src_path": path, "original_path": path,
+            }
+            _save_state(cid, title, path, dur)
+            start_tasks(h, cid, calls, PLAY_STATE[key], dur)
+            await report("playing", title=title, duration=dur, position=0)
+            log(f"[play] ✅ {title}")
+        except Exception as e:
+            log(f"[play] err: {e}"); log(traceback.format_exc())
+            await report("error", error=str(e))
+        return
+
+    state = PLAY_STATE.get(key, {})
+
+    # ─── PAUSE ───
+    if action == "pause":
+        try: await calls.pause(cid)
+        except: pass
+        # position رو توی base_pos بریز
+        state["base_pos"] = cur_pos(state)
+        state["playing"] = False
+        state["position"] = 0
+        await report("playing", title=state.get("title","—"),
+                     duration=state.get("duration",0), position=state["position"], paused=True)
+        return
+    # ─── RESUME ───
+    if action == "resume":
+        try: await calls.resume(cid)
+        except: pass
+        state["started_at"] = time.time()
+        state["playing"] = True
+        # base_pos قبلی حفظ بشه
+        await report("playing", title=state.get("title","—"),
+                     duration=state.get("duration",0), position=state.get("position",0))
+        return
+    # ─── STOP ───
+    if action == "stop":
+        state["active"] = False
+        cancel_tasks(state)
+        try: await calls.leave_call(cid)
+        except: pass
+        PLAY_STATE.pop(key, None)
+        _clear_state(cid)
+        await report("stopped")
+        return
+    # ─── MUTE ───
+    if action == "mute":
+        try: await calls.mute(cid)
+        except: pass
+        await report("playing", title=state.get("title","—"), muted=True)
+        return
+    if action == "unmute":
+        try: await calls.unmute(cid)
+        except: pass
+        await report("playing", title=state.get("title","—"), muted=False)
+        return
+    # ─── VOLUME ───
+    if action == "volume":
+        v = max(1, min(200, int(cmd.get("volume", 100))))
+        try: await calls.change_volume_call(cid, v)
+        except: pass
+        state["volume"] = v
+        await report("playing", title=state.get("title","—"),
+                     duration=state.get("duration",0), volume=v)
+        return
+    if action == "volume_up":
+        v = min(200, int(state.get("volume",100)) + 10)
+        try: await calls.change_volume_call(cid, v)
+        except: pass
+        state["volume"] = v
+        await report("playing", title=state.get("title","—"),
+                     duration=state.get("duration",0), volume=v)
+        return
+    if action == "volume_down":
+        v = max(10, int(state.get("volume",100)) - 10)
+        try: await calls.change_volume_call(cid, v)
+        except: pass
+        state["volume"] = v
+        await report("playing", title=state.get("title","—"),
+                     duration=state.get("duration",0), volume=v)
+        return
+    # ─── NEXT ───
+    if action in ("next", "skip"):
+        log("[next]")
+        state["active"] = False
+        try: await calls.leave_call(cid)
+        except: pass
+        PLAY_STATE.pop(key, None)
+        await asyncio.sleep(1)
+        nxt = await qnext(h, cid)
+        if nxt:
+            log(f"[next] → {nxt['query']}")
+            await handle({"action":"play","chat_id":cid,"query":nxt["query"],
+                          "requested_by":nxt.get("requested_by"),
+                          "requested_by_name":nxt.get("requested_by_name","")}, calls, h)
+        else:
+            await report("stopped")
+        return
+    if action == "previous":
+        log("[prev] not supported")
+        return
+    # ─── SPEED ───
+    if action == "speed":
+        val = max(0.5, min(2.0, float(cmd.get("value", 1.0))))
+        src = state.get("original_path") or state.get("src_path")
+        if not src or not os.path.exists(src):
+            await report("error", error="no src"); return
+        cp = cur_pos(state)
+        log(f"[speed] {val}x @ {cp}s")
+        await report("joining", title=state.get("title","—"),
+                     duration=state.get("duration",0), speed=val)
+        try:
+            state["active"] = False
+            await asyncio.sleep(0.3)
+            eq = state.get("eq")
+            new_path, new_dur = await asyncio.to_thread(
+                process_audio, src, f"spd{val}", cp, val, eq)
+            stream = MediaStream(new_path, audio_parameters=AudioQuality.HIGH,
+                                 video_flags=MediaStream.Flags.IGNORE)
+            try: await calls.change_stream(cid, stream)
+            except: await calls.play(cid, stream)
+            orig_dur = int(state.get("duration", 0) or new_dur + cp)
+            state["base_pos"] = cp
+            state["started_at"] = time.time()
+            state["position"] = 0
+            state["speed"] = val
+            state["src_path"] = new_path
+            state["duration"] = orig_dur
+            state["active"] = True
+            state["playing"] = True
+            # زمان باقی‌مانده با speed جدید
+            remaining = max(1, int((orig_dur - cp) / val)) if val > 0 else (orig_dur - cp)
+            start_tasks(h, cid, calls, state, remaining)
+            await report("playing", title=state.get("title","—"),
+                         duration=orig_dur, position=cp, speed=val)
+            log(f"[speed] ✅ {val}x @ {cp}s")
+        except Exception as e:
+            log(f"[speed] err: {e}")
+            await report("error", error=str(e))
+        return
+    if action == "speed_delta":
+        cur = float(state.get("speed", 1.0))
+        val = max(0.5, min(2.0, cur + float(cmd.get("delta", 0))))
+        await handle({"action":"speed","chat_id":cid,"value":val,"id":cmd.get("id")}, calls, h)
+        return
+    # ─── SEEK ───
+    if action == "seek":
+        direction = cmd.get("direction", "fwd")
+        secs = int(cmd.get("seconds", 30))
+        src = state.get("original_path") or state.get("src_path")
+        if not src or not os.path.exists(src):
+            await report("error", error="no src"); return
+        cp = cur_pos(state)
+        dur = int(state.get("duration", 0))
+        if direction == "fwd":
+            new_pos = min(cp + secs, max(0, dur - 3))
+        else:
+            new_pos = max(cp - secs, 0)
+        log(f"[seek] {direction} {secs}s {cp}→{new_pos}")
+        await report("joining", title=state.get("title","—"),
+                     duration=dur, position=new_pos)
+        try:
+            state["active"] = False
+            await asyncio.sleep(0.3)
+            spd = float(state.get("speed", 1.0))
+            eq = state.get("eq")
+            new_path, new_dur = await asyncio.to_thread(
+                process_audio, src, f"sk{new_pos}", new_pos, spd, eq)
+            stream = MediaStream(new_path, audio_parameters=AudioQuality.HIGH,
+                                 video_flags=MediaStream.Flags.IGNORE)
+            try: await calls.change_stream(cid, stream)
+            except: await calls.play(cid, stream)
+            orig_dur = int(state.get("duration", 0) or new_dur + new_pos)
+            state["base_pos"] = new_pos
+            state["started_at"] = time.time()
+            state["position"] = 0
+            state["src_path"] = new_path
+            state["duration"] = orig_dur
+            state["active"] = True
+            state["playing"] = True
+            start_tasks(h, cid, calls, state, orig_dur - new_pos)
+            await report("playing", title=state.get("title","—"),
+                         duration=orig_dur, position=new_pos)
+            log(f"[seek] ✅ @ {new_pos}s")
+        except Exception as e:
+            log(f"[seek] err: {e}")
+            await report("error", error=str(e))
+        return
+    # ─── EQ ───
+    if action == "eq":
+        eq_name = (cmd.get("eq") or "off").lower().strip()
+        src = state.get("original_path") or state.get("src_path")
+        if not src or not os.path.exists(src):
+            await report("error", error="no src"); return
+        cp = cur_pos(state)
+        log(f"[eq] {eq_name} @ {cp}s")
+        if eq_name in ("off", "none", ""):
+            await report("joining", title=state.get("title","—"),
+                         duration=state.get("duration",0), eq="off")
+            try:
+                state["active"] = False
+                await asyncio.sleep(0.3)
+                spd = float(state.get("speed", 1.0))
+                new_path, new_dur = await asyncio.to_thread(
+                    process_audio, src, "eqoff", cp, spd, None)
+                stream = MediaStream(new_path, audio_parameters=AudioQuality.HIGH,
+                                     video_flags=MediaStream.Flags.IGNORE)
+                try: await calls.change_stream(cid, stream)
+                except: await calls.play(cid, stream)
+                orig_dur = int(state.get("duration", 0) or new_dur + cp)
+                state["base_pos"] = cp
+                state["started_at"] = time.time()
+                state["position"] = 0
+                state["src_path"] = new_path
+                state["duration"] = orig_dur
+                state["eq"] = None
+                state["active"] = True
+                state["playing"] = True
+                start_tasks(h, cid, calls, state, orig_dur - cp)
+                await report("playing", title=state.get("title","—"),
+                             duration=orig_dur, position=cp, eq="off")
+                log(f"[eq] ✅ off @ {cp}s")
+            except Exception as e:
+                log(f"[eq] err: {e}")
+            return
+        if eq_name not in EQ_MAP:
+            await report("error", error=f"eq invalid: {eq_name}"); return
+        await report("joining", title=state.get("title","—"),
+                     duration=state.get("duration",0), eq=eq_name)
+        try:
+            state["active"] = False
+            await asyncio.sleep(0.3)
+            spd = float(state.get("speed", 1.0))
+            new_path, new_dur = await asyncio.to_thread(
+                process_audio, src, f"eq_{eq_name}", cp, spd, eq_name)
+            stream = MediaStream(new_path, audio_parameters=AudioQuality.HIGH,
+                                 video_flags=MediaStream.Flags.IGNORE)
+            try: await calls.change_stream(cid, stream)
+            except: await calls.play(cid, stream)
+            orig_dur = int(state.get("duration", 0) or new_dur + cp)
+            # ★ started_at = now - cp → پنل از cp ادامه بده
+            state["started_at"] = time.time() - cp
+            state["position"] = cp
+            state["src_path"] = new_path
+            state["duration"] = orig_dur  # ← مدت کل اصلی
+            state["eq"] = eq_name
+            state["active"] = True
+            state["playing"] = True
+            start_tasks(h, cid, calls, state, orig_dur - cp)
+            await report("playing", title=state.get("title","—"),
+                         duration=orig_dur, position=cp, eq=eq_name)
+            log(f"[eq] ✅ {eq_name} @ {cp}s")
+        except Exception as e:
+            log(f"[eq] err: {e}")
+            await report("error", error=str(e))
+        return
+    # ─── REPEAT / SHUFFLE ───
+    if action == "cycle_repeat":
+        cur = state.get("repeat", "off")
+        nxt = {"off":"one","one":"all","all":"off"}.get(cur, "off")
+        state["repeat"] = nxt
+        await report("playing", title=state.get("title","—"),
+                     duration=state.get("duration",0), repeat=nxt)
+        return
+    if action == "toggle_shuffle":
+        state["shuffle"] = not state.get("shuffle", False)
+        await report("playing", title=state.get("title","—"),
+                     duration=state.get("duration",0), shuffle=state["shuffle"])
+        return
+    # ─── DOWNLOAD FILE ───
+    if action == "download_file":
+        quality = int(cmd.get("quality", 128))
+        uid = cmd.get("user_id")
+        src = state.get("original_path") or state.get("src_path")
+        title = state.get("title", "Unknown")
+        if not src or not os.path.exists(src):
+            await report("error", error="no src"); return
+        try:
+            SHARED = "/data/data/com.termux/files/home/sk_media/tg_files"
+            os.makedirs(SHARED, exist_ok=True)
+            out = f"{SHARED}/dl_{int(time.time())}_{quality}k.mp3"
+            subprocess.run(["ffmpeg","-y","-loglevel","error","-i",src,
+                            "-c:a","libmp3lame","-b:a",f"{quality}k","-map_metadata","0",out],
+                           check=True, capture_output=True, timeout=120)
+            try: set_id3(out, title)
+            except: pass
+            await report("file_ready", title=title, path=out, quality=quality, user_id=uid)
+            log(f"[dl_file] ✅ {out}")
+        except Exception as e:
+            log(f"[dl_file] err: {e}")
+            await report("error", error=str(e))
+        return
+
+        # ─── RECORD COMMANDS ───
+        if action in ("record_start", "record_stop", "record_pause", "record_resume"):
+            try:
+                await _rec.handle_cmd(calls, cmd)
+                await report("record_status", title=state.get("title","—"))
+            except Exception as e:
+                log(f"[rec] handle err: {e}")
+                await report("error", error=f"rec: {e}")
+            return
+
+    log(f"[cmd] unknown: {action}")
+
+# ═══════════════════════════════════════════════
+# poll
+# ═══════════════════════════════════════════════
+async def poll(calls):
+    async with httpx.AsyncClient(timeout=30) as h:
+        n = 0
+        while True:
+            try:
+                r = await h.get(f"{SERVER}/commands")
+                if r.status_code == 200:
+                    for c in r.json():
+                        try: await handle(c, calls, h)
+                        except Exception as e:
+                            log(f"handle err: {e}"); log(traceback.format_exc())
+                n += 1
+                if n % 60 == 0: log(f"[hb] {n}")
+            except Exception as e:
+                log(f"poll err: {e}")
+            await asyncio.sleep(POLL_SEC)
+
+# ═══════════════════════════════════════════════
+# main
+# ═══════════════════════════════════════════════
+async def main():
+    log("=== Sk.Media Player START ===")
+    log(f"session: {len(SESSION)}")
+    app = Client("sk_player", api_id=API_ID, api_hash=API_HASH,
+                 session_string=SESSION, workdir="/root/melody-player")
+    calls = PyTgCalls(app)
+    @calls.on_update()
+    async def _u(client, update):
+        log(f"[upd] {type(update).__name__}")
+    await app.start()
+    me = await app.get_me()
+    log(f"me: @{me.username}")
+    await calls.start()
+    log("✅ ready — polling")
+    try:
+        await poll(calls)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try: await app.stop()
+        except: pass
+
+if __name__ == "__main__":
+    asyncio.run(main())

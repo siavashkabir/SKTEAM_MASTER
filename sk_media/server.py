@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Sk.Media Server v3 - queue + position + fixed keys"""
+from aiohttp import web
+import json, uuid, sys, time
+
+QUEUE = []
+STATUS = {}
+LOG_TAIL = []
+PENDING_FILES = []
+PENDING_RECORDS = []
+QUEUES = {}   # {str(chat_id): [items]}
+CURRENT = {}  # {str(chat_id): {title, position, ...}}
+
+def log(*a):
+    line = " ".join(str(x) for x in a)
+    print(f"[{time.strftime('%H:%M:%S')}] {line}", flush=True)
+    LOG_TAIL.append(line)
+    if len(LOG_TAIL) > 200: del LOG_TAIL[:100]
+
+# ─── player commands ───
+async def get_commands(request):
+    global QUEUE
+    cmds = QUEUE[:]; QUEUE.clear()
+    if cmds: log(f"player polled, sent {len(cmds)} cmds")
+    return web.json_response(cmds)
+
+async def add_command(request):
+    data = await request.json()
+    if "id" not in data: data["id"] = str(uuid.uuid4())[:8]
+    QUEUE.append(data)
+    log(f"+cmd {data.get('action')} q={data.get('query','')!r} id={data['id']}")
+    return web.json_response({"ok": True, "id": data["id"]})
+
+async def update_status(request):
+    data = await request.json()
+    STATUS[data.get("id")] = data
+    cid_raw = data.get("chat_id")
+    if cid_raw is None:
+        return web.json_response({"ok": True})
+    cid = str(cid_raw)  # ★ always str
+
+    status = data.get("status")
+    if status in ("playing", "downloaded", "joining"):
+        prev = CURRENT.get(cid, {})
+        new_title = data.get("title", prev.get("title", "—"))
+        # ★ اگه آهنگ عوض شده، position/time رو reset کن
+        title_changed = (prev and prev.get("title") and prev.get("title") != new_title)
+        if title_changed or not prev:
+            pos_val = 0
+            started = int(time.time())
+        else:
+            pos_val = int(data.get("position", prev.get("position", 0)) or 0)
+            started = prev.get("started_at") or int(time.time())
+        CURRENT[cid] = {
+            "title": new_title,
+            "duration": int(data.get("duration", prev.get("duration", 0)) or 0),
+            "status": status,
+            "position": pos_val,
+            "paused": bool(data.get("paused", prev.get("paused", False))),
+            "speed": float(data.get("speed", prev.get("speed", 1.0))),
+            "volume": int(data.get("volume", prev.get("volume", 100))),
+            "repeat": data.get("repeat", prev.get("repeat", "off")),
+            "shuffle": bool(data.get("shuffle", prev.get("shuffle", False))),
+            "started_at": started,
+            "requested_by_name": data.get("requested_by_name", prev.get("requested_by_name", "")),
+        }
+        if title_changed:
+            log(f"CURRENT[{cid}] TITLE CHANGED → {new_title!r} (reset pos/time)")
+        log(f"CURRENT[{cid}] status={status} title={data.get('title','')!r}")
+    elif status == "record_ready":
+        PENDING_RECORDS.append({
+            "chat_id": cid,
+            "path": data.get("path"),
+            "clip_sec": data.get("clip_sec", 0),
+            "ts": data.get("ts", int(time.time())),
+        })
+        log(f"[rec] received from player: {data.get('path')}")
+    elif status == "file_ready":
+        PENDING_FILES.append({
+            "chat_id": cid, "path": data.get("path"),
+            "title": data.get("title"), "quality": data.get("quality"),
+            "user_id": data.get("user_id"), "ts": int(time.time()),
+        })
+        log(f"[file_ready] {data.get('title')!r}")
+    elif status in ("stopped", "error"):
+        CURRENT.pop(cid, None)
+        # ★ FIX: صف هم پاک شه
+        if cid in QUEUES and QUEUES[cid]:
+            n = len(QUEUES[cid])
+            QUEUES[cid] = []
+            log(f"CURRENT[{cid}] cleared ({status}) + queue cleared ({n} items)")
+        else:
+            log(f"CURRENT[{cid}] cleared ({status})")
+
+    return web.json_response({"ok": True})
+
+async def update_position(request):
+    data = await request.json()
+    cid = str(data.get("chat_id"))
+    if cid not in CURRENT:
+        # اگه player position می‌فرسته، یعنی داره پخش می‌کنه
+        # ولی CURRENT نداره (server restart شد) → بساز
+        CURRENT[cid] = {
+            "title": data.get("title", "—"),
+            "duration": int(data.get("duration", 0)),
+            "status": "playing",
+            "position": int(data.get("position", 0)),
+            "paused": bool(data.get("paused", False)),
+            "started_at": int(time.time()) - int(data.get("position", 0)),
+        }
+        log(f"CURRENT[{cid}] recreated from position")
+    else:
+        CURRENT[cid]["position"] = int(data.get("position", 0))
+        CURRENT[cid]["duration"] = int(data.get("duration", CURRENT[cid].get("duration", 0)))
+        if data.get("paused") is not None:
+            CURRENT[cid]["paused"] = bool(data["paused"])
+    # ★ FIX: بقیه فیلدها
+    if data.get("volume") is not None:
+        CURRENT[cid]["volume"] = int(data["volume"])
+    if data.get("speed") is not None:
+        CURRENT[cid]["speed"] = float(data["speed"])
+    if data.get("repeat") is not None:
+        CURRENT[cid]["repeat"] = data["repeat"]
+    if data.get("shuffle") is not None:
+        CURRENT[cid]["shuffle"] = bool(data["shuffle"])
+    return web.json_response({"ok": True})
+
+async def get_now(request):
+    cid = str(request.query.get("chat_id", ""))
+    cur = CURRENT.get(cid)
+    if not cur:
+        return web.json_response({"playing": False})
+    if cur.get("status") not in ("playing", "downloaded", "loading", "joining"):
+        return web.json_response({"playing": False})
+    # ★ فقط به position از player اعتماد کن
+    pos = int(cur.get("position", 0))
+    dur = int(cur.get("duration", 0))
+    # اگه از duration بیشتر شد، cap کن
+    if dur > 0 and pos > dur:
+        pos = dur
+    return web.json_response({
+        "playing": True,
+        "title": cur.get("title", "—"),
+        "duration": cur.get("duration", 0),
+        "position": pos,
+        "paused": cur.get("paused", False),
+        "speed": cur.get("speed", 1.0),
+        "repeat": cur.get("repeat", "off"),
+        "shuffle": cur.get("shuffle", False),
+        "muted": cur.get("muted", False),
+        "volume": cur.get("volume", 100),
+        "source": cur.get("source", "SoundCloud"),
+        "requested_by_name": cur.get("requested_by_name", "—"),
+    })
+
+async def reset_current(request):
+    """CURRENT و QUEUES رو خالی کن"""
+    global CURRENT, QUEUES
+    n = len(CURRENT)
+    m = sum(len(v) for v in QUEUES.values())
+    CURRENT = {}
+    QUEUES = {}
+    log(f"reset: cleared {n} current + {m} queued")
+    return web.json_response({"ok": True, "cleared": n, "queued": m})
+
+
+async def record_ready_endpoint(request):
+    """recorder.py از Ubuntu این رو صدا می‌زنه"""
+    data = await request.json()
+    PENDING_RECORDS.append(data)
+    log(f"[rec] queued: {data.get('path')}")
+    return web.json_response({"ok": True})
+
+
+async def get_pending_records(request):
+    """bot از Termux این رو چک می‌کنه"""
+    global PENDING_RECORDS
+    files = PENDING_RECORDS[:]
+    PENDING_RECORDS.clear()
+    return web.json_response({"files": files})
+
+
+async def get_pending_files(request):
+    global PENDING_FILES
+    files = PENDING_FILES[:]
+    PENDING_FILES.clear()
+    return web.json_response({"files": files})
+
+
+async def api_groups(request):
+    """لیست گروه‌ها از groupbot.db"""
+    import sqlite3
+    from pathlib import Path
+    try:
+        db = Path.home() / "groupbot" / "data" / "groupbot.db"
+        if not db.exists():
+            return web.json_response({"groups": [], "err": "db not found"})
+        c = sqlite3.connect(str(db), timeout=5)
+        rows = c.execute("SELECT chat_id FROM groups").fetchall()
+        c.close()
+        return web.json_response({"groups": [r[0] for r in rows]})
+    except Exception as e:
+        return web.json_response({"groups": [], "err": str(e)})
+
+
+async def vcstat_report(request):
+    """دریافت VCSTAT از player و ذخیره در groupbot.db"""
+    import sqlite3
+    from pathlib import Path
+    try:
+        data = await request.json()
+        chat_id = data.get("chat_id")
+        date = data.get("date", "")
+        users = data.get("users", [])
+        if not chat_id or not users:
+            return web.json_response({"ok": False, "err": "no data"})
+        db = Path.home() / "groupbot" / "data" / "groupbot.db"
+        if not db.exists():
+            return web.json_response({"ok": False, "err": "db not found"})
+        import datetime
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c = sqlite3.connect(str(db), timeout=5)
+        # ذخیره در voice_call_reports
+        c.execute("""INSERT OR REPLACE INTO voice_call_reports (chat_id, date, total_seconds, received_at)
+                     VALUES (?, ?, ?, ?)""",
+                  (chat_id, date, data.get("total_seconds", 0), now))
+        # ذخیره در voice_call_stats (که /vcstats ازش می‌خونه)
+        c.execute("DELETE FROM voice_call_stats WHERE chat_id=? AND date=?", (chat_id, date))
+        for u in users:
+            c.execute("""INSERT INTO voice_call_stats
+                (chat_id, user_id, username, first_name, date, total_seconds, session_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (chat_id, u.get("user_id", 0), u.get("username", ""),
+                 u.get("first_name", ""), date,
+                 u.get("total_seconds", 0), u.get("session_count", 1), now))
+        c.commit()
+        c.close()
+        log(f"[vcstat] saved {len(users)} users for chat={chat_id} date={date}")
+        return web.json_response({"ok": True, "saved": len(users)})
+    except Exception as e:
+        log(f"[vcstat] err: {e}")
+        return web.json_response({"ok": False, "err": str(e)})
+
+
+async def health(request):
+    return web.json_response({
+        "ok": True,
+        "queue": len(QUEUE),
+        "queues": {k: len(v) for k, v in QUEUES.items()},
+        "current": CURRENT,
+        "events": LOG_TAIL[-10:],
+    })
+
+# ─── queue ───
+async def queue_add(request):
+    data = await request.json()
+    cid = str(data["chat_id"])
+    item = {
+        "id": str(uuid.uuid4())[:8],
+        "query": data["query"],
+        "requested_by": data.get("requested_by"),
+        "requested_by_name": data.get("requested_by_name", ""),
+        "added_at": int(time.time()),
+    }
+    QUEUES.setdefault(cid, []).append(item)
+    log(f"+queue[{cid}] {item['query']} (size={len(QUEUES[cid])})")
+    return web.json_response({"ok": True, "size": len(QUEUES[cid]), "item": item})
+
+async def queue_peek(request):
+    """★ peek: آهنگ اول صف رو نشون بده بدون pop"""
+    cid = str(request.query.get("chat_id", ""))
+    q = QUEUES.get(cid, [])
+    if not q:
+        return web.json_response({"ok": True, "next": None})
+    return web.json_response({"ok": True, "next": q[0]})
+
+
+async def queue_next(request):
+    cid = str(request.query.get("chat_id", ""))
+    q = QUEUES.get(cid, [])
+    if not q:
+        return web.json_response({"ok": True, "next": None, "size": 0})
+    item = q.pop(0)
+    # ★ CURRENT رو ریست کن → پنل بلافاصله آهنگ جدید رو نشون بده
+    CURRENT[cid] = {
+        "title": item["query"],
+        "duration": 0,
+        "status": "loading",
+        "position": 0,
+        "paused": False,
+        "speed": 1.0,
+        "repeat": "off",
+        "shuffle": False,
+        "started_at": int(time.time()),
+        "requested_by_name": item.get("requested_by_name", ""),
+    }
+    log(f"-queue[{cid}] pop {item['query']} → CURRENT reset (loading)")
+    return web.json_response({"ok": True, "next": item, "size": len(q)})
+
+async def queue_list(request):
+    cid = str(request.query.get("chat_id", ""))
+    return web.json_response({
+        "ok": True,
+        "items": QUEUES.get(cid, []),
+        "current": CURRENT.get(cid),
+    })
+
+async def queue_clear(request):
+    data = await request.json()
+    cid = str(data["chat_id"])
+    QUEUES[cid] = []
+    return web.json_response({"ok": True})
+
+async def queue_remove(request):
+    data = await request.json()
+    cid = str(data["chat_id"]); idx = data.get("index", -1)
+    q = QUEUES.get(cid, [])
+    if 0 <= idx < len(q):
+        q.pop(idx)
+        return web.json_response({"ok": True, "size": len(q)})
+    return web.json_response({"ok": False, "error": "index"})
+
+def main():
+    log("Sk.Media v3 starting on 127.0.0.1:8080")
+    app = web.Application()
+    app.router.add_get('/commands', get_commands)
+    app.router.add_post('/command', add_command)
+    app.router.add_post('/status', update_status)
+    app.router.add_post('/vcstat/report', vcstat_report)
+    app.router.add_get('/status', lambda r: web.json_response(STATUS))
+    app.router.add_post('/position', update_position)
+    app.router.add_get('/now-playing', get_now)
+    app.router.add_post('/reset-current', reset_current)
+    app.router.add_get('/health', health)
+    app.router.add_get('/api/groups', api_groups)
+    app.router.add_post('/record_ready', record_ready_endpoint)
+    app.router.add_get('/pending_records', get_pending_records)
+    app.router.add_get('/pending_files', get_pending_files)
+    app.router.add_post('/queue/add', queue_add)
+    app.router.add_get('/queue/next', queue_next)
+    app.router.add_get('/queue/peek', queue_peek)
+    app.router.add_get('/queue/list', queue_list)
+    app.router.add_post('/queue/clear', queue_clear)
+    app.router.add_post('/queue/remove', queue_remove)
+    web.run_app(app, host='127.0.0.1', port=8080, print=None)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,3514 @@
+from pathlib import Path
+import sqlite3
+import os
+from datetime import datetime, timedelta
+from config import DATABASE_PATH
+
+os.makedirs(str(Path(__file__).resolve().parent / "data"), exist_ok=True)
+
+NSFW_DATE_FMT = "%Y-%m-%d %H:%M"
+
+ADMIN_PERMS = [
+    ("panel", "🔓 باز کردن پنل ربات"),
+    ("vip", "👑 VIP دادن"),
+    ("tag", "📢 تگ کردن"),
+    ("purge", "🗑️ پاکسازی"),
+    ("link", "🔗 لینک گروه"),
+    ("pin", "📌 پین کردن"),
+    ("ban", "🚫 بن کردن"),
+    ("mute", "🔇 سکوت کردن"),
+    ("vcall", "🎤 مدیریت ویس کال"),
+    ("special", "⭐ تنظیم ویژه"),
+    ("stats_call", "📞 آمار کال"),
+    ("stats_chat", "💬 آمار چت روزانه"),
+]
+
+VIP_PERMS = [
+    ("gif", "🎞️ ارسال گیف"),
+    ("sticker", "🎨 ارسال استیکر"),
+    ("photo", "🖼️ ارسال عکس"),
+    ("link", "🔗 ارسال لینک"),
+    ("forward", "📎 فوروارد"),
+    ("mention", "📣 منشن کردن"),
+    ("vcall", "🎤 مدیریت ویس کال"),
+]
+
+DEPUTY_PERMS = [
+    ("panel", "🔓 باز کردن پنل ربات"),
+    ("vip", "👑 VIP دادن"),
+    ("tag", "📢 تگ کردن"),
+    ("purge", "🗑️ پاکسازی"),
+    ("link", "🔗 لینک گروه"),
+    ("pin", "📌 پین کردن"),
+    ("ban", "🚫 بن کردن"),
+    ("mute", "🔇 سکوت کردن"),
+    ("vcall", "🎤 مدیریت ویس کال"),
+    ("special", "⭐ تنظیم ویژه"),
+    ("stats_call", "📞 آمار کال"),
+    ("stats_chat", "💬 آمار چت روزانه"),
+    ("locks", "🔒 قفل ها"),
+    ("welcome", "👋 خوش‌آمدگویی"),
+    ("nsfw", "🔞 NSFW"),
+    ("warn", "⚠️ سیستم اخطار"),
+    ("config", "⚙️ پیکربندی"),
+    ("admin_add", "👮 تعیین ادمین"),
+    ("deputy_manage", "🧑‍💼 مدیریت معاون‌ها"),
+    ("group_info", "✏️ تغییر اطلاعات گروه"),
+    ("group_settings", "🎛️ تنظیمات گروه"),
+    ("stats_full", "📊 آمار کل"),
+]
+
+
+def init_db():
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+
+    # ===== جدول‌های آمار کال (برای هماهنگی با ربات موزیک پلیر) =====
+    c.execute("""CREATE TABLE IF NOT EXISTS voice_call_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        first_name TEXT,
+        date TEXT NOT NULL,
+        total_seconds INTEGER DEFAULT 0,
+        session_count INTEGER DEFAULT 0,
+        updated_at TEXT,
+        UNIQUE(chat_id, user_id, date)
+    )""")
+    
+    c.execute("""CREATE TABLE IF NOT EXISTS voice_call_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        joined_at TEXT NOT NULL,
+        left_at TEXT,
+        duration_seconds INTEGER DEFAULT 0
+    )""")
+    
+    c.execute("""CREATE TABLE IF NOT EXISTS voice_call_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        total_seconds INTEGER DEFAULT 0,
+        received_at TEXT,
+        UNIQUE(chat_id, date)
+    )""")
+
+    c.execute("CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT, welcome_enabled INTEGER DEFAULT 1, welcome_text TEXT, expire_date TEXT, activated INTEGER DEFAULT 0)")
+    c.execute("CREATE TABLE IF NOT EXISTS locks (chat_id INTEGER, lock_name TEXT, is_enabled INTEGER DEFAULT 0, PRIMARY KEY (chat_id, lock_name))")
+    c.execute("CREATE TABLE IF NOT EXISTS settings (chat_id INTEGER, setting_name TEXT, value TEXT, PRIMARY KEY (chat_id, setting_name))")
+    c.execute("CREATE TABLE IF NOT EXISTS warns (chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))")
+    c.execute("CREATE TABLE IF NOT EXISTS vip_members (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT, expire_date TEXT, PRIMARY KEY (chat_id, user_id))")
+    c.execute("CREATE TABLE IF NOT EXISTS deputies (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT, PRIMARY KEY (chat_id, user_id))")
+    c.execute("CREATE TABLE IF NOT EXISTS group_owners (chat_id INTEGER PRIMARY KEY, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS deputy_perms (chat_id INTEGER, perm_name TEXT, is_enabled INTEGER DEFAULT 0, PRIMARY KEY (chat_id, perm_name))")
+    c.execute("CREATE TABLE IF NOT EXISTS user_perms (chat_id INTEGER, user_id INTEGER, perm_name TEXT, is_enabled INTEGER DEFAULT 1, PRIMARY KEY (chat_id, user_id, perm_name))")
+    c.execute("CREATE TABLE IF NOT EXISTS bot_admins (user_id INTEGER PRIMARY KEY, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS purge_schedule (chat_id INTEGER PRIMARY KEY, purge_time TEXT, sections TEXT, enabled INTEGER DEFAULT 0, last_run TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS nsfw_subs (chat_id INTEGER PRIMARY KEY, expire_date TEXT, enabled INTEGER DEFAULT 0, added_at TEXT)")
+    conn.commit()
+    conn.close()
+
+
+def init_members_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS members (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, join_date TEXT, message_count INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))")
+    conn.commit()
+    conn.close()
+
+
+def init_bot_chats_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS bot_chats (chat_id INTEGER PRIMARY KEY, title TEXT)")
+    conn.commit()
+    conn.close()
+
+
+def init_purge_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS purge_schedule (chat_id INTEGER PRIMARY KEY, purge_time TEXT, sections TEXT, enabled INTEGER DEFAULT 0, last_run TEXT)")
+    conn.commit()
+    conn.close()
+
+
+def init_group_owner_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS group_owners (chat_id INTEGER PRIMARY KEY, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT)")
+    conn.commit()
+    conn.close()
+
+
+# ============================================
+# عمومی
+# ============================================
+
+def get_group(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM groups WHERE chat_id = ?", (chat_id,))
+    row = c.fetchone()
+    if not row:
+        c.execute("INSERT INTO groups (chat_id) VALUES (?)", (chat_id,))
+        conn.commit()
+        c.execute("SELECT * FROM groups WHERE chat_id = ?", (chat_id,))
+        row = c.fetchone()
+    conn.close()
+    return row
+
+
+def update_group(chat_id, **kwargs):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    for key, value in kwargs.items():
+        c.execute("UPDATE groups SET " + key + " = ? WHERE chat_id = ?", (value, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def get_lock(chat_id, lock_name):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT is_enabled FROM locks WHERE chat_id = ? AND lock_name = ?", (chat_id, lock_name))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def toggle_lock(chat_id, lock_name):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT is_enabled FROM locks WHERE chat_id = ? AND lock_name = ?", (chat_id, lock_name))
+    row = c.fetchone()
+    if row:
+        new_val = 0 if row[0] else 1
+        c.execute("UPDATE locks SET is_enabled = ? WHERE chat_id = ? AND lock_name = ?", (new_val, chat_id, lock_name))
+    else:
+        new_val = 1
+        c.execute("INSERT INTO locks (chat_id, lock_name, is_enabled) VALUES (?, ?, 1)", (chat_id, lock_name))
+    conn.commit()
+    conn.close()
+    return new_val
+
+
+def get_all_locks(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT lock_name, is_enabled FROM locks WHERE chat_id = ?", (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    return {name: val for name, val in rows}
+
+
+def get_setting(chat_id, setting_name, default=None):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE chat_id = ? AND setting_name = ?", (chat_id, setting_name))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return row[0]
+        return default
+    except Exception as e:
+        print("[GET SETTING ERR] " + str(e))
+        return default
+
+
+def set_setting(chat_id, setting_name, value):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO settings (chat_id, setting_name, value) VALUES (?, ?, ?)", (chat_id, setting_name, str(value)))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[SET SETTING ERR] " + str(e))
+        return False
+
+
+def get_warn(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT count FROM warns WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def add_warn(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO warns (chat_id, user_id, count) VALUES (?, ?, 0)", (chat_id, user_id))
+    c.execute("UPDATE warns SET count = count + 1 WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    c.execute("SELECT count FROM warns WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    count = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return count
+
+
+def reset_warn(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM warns WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def save_member(chat_id, user_id, first_name, username, join_date):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO members (chat_id, user_id, first_name, username, join_date) VALUES (?, ?, ?, ?, ?)", (chat_id, user_id, first_name, username, join_date))
+    c.execute("UPDATE members SET first_name = ?, username = ? WHERE chat_id = ? AND user_id = ?", (first_name, username, chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def increment_message_count(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO members (chat_id, user_id, message_count) VALUES (?, ?, 0)", (chat_id, user_id))
+    c.execute("UPDATE members SET message_count = message_count + 1 WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_member(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT first_name, username, join_date, message_count FROM members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def add_bot_chat(chat_id, title):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS bot_chats (chat_id INTEGER PRIMARY KEY, title TEXT)")
+    c.execute("INSERT OR REPLACE INTO bot_chats (chat_id, title) VALUES (?, ?)", (chat_id, title or ""))
+    conn.commit()
+    conn.close()
+
+
+def remove_bot_chat(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS bot_chats (chat_id INTEGER PRIMARY KEY, title TEXT)")
+    c.execute("DELETE FROM bot_chats WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_all_bot_chats():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS bot_chats (chat_id INTEGER PRIMARY KEY, title TEXT)")
+    c.execute("SELECT chat_id, title FROM bot_chats")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+# ============================================
+# Bot Admins
+# ============================================
+
+def add_bot_admin(user_id, first_name, username, added_by):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        c.execute("INSERT OR REPLACE INTO bot_admins (user_id, first_name, username, added_by, added_at) VALUES (?, ?, ?, ?, ?)", (user_id, first_name or "", username or "", added_by, now))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[ADD BOT ADMIN ERR] " + str(e))
+        return False
+
+
+def remove_bot_admin(user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM bot_admins WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[REMOVE BOT ADMIN ERR] " + str(e))
+        return False
+
+
+def is_bot_admin(user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM bot_admins WHERE user_id = ?", (user_id,))
+        row = c.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        print("[IS BOT ADMIN ERR] " + str(e))
+        return False
+
+
+def get_all_bot_admins():
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, first_name, username, added_at FROM bot_admins")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[GET BOT ADMINS ERR] " + str(e))
+        return []
+
+
+# ============================================
+# VIP
+# ============================================
+
+def add_vip(chat_id, user_id, first_name, username, added_by, expire_date=None):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        c.execute("INSERT OR REPLACE INTO vip_members (chat_id, user_id, first_name, username, added_by, added_at, expire_date) VALUES (?, ?, ?, ?, ?, ?, ?)", (chat_id, user_id, first_name or "", username or "", added_by, now, expire_date))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[ADD VIP ERR] " + str(e))
+        return False
+
+
+def remove_vip(chat_id, user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM vip_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[REMOVE VIP ERR] " + str(e))
+        return False
+
+
+def is_vip(chat_id, user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT expire_at FROM vip_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return False
+        expire_date = row[0]
+        if not expire_date:
+            return True
+        try:
+            exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M")
+            return exp > datetime.now()
+        except Exception:
+            return True
+    except Exception as e:
+        print("[IS VIP ERR] " + str(e))
+        return False
+
+
+def get_all_vips(chat_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, first_name, username, added_by, added_at, expire_date FROM vip_members WHERE chat_id = ?", (chat_id,))
+        rows = c.fetchall()
+        conn.close()
+        now = datetime.now()
+        activated = []
+        for r in rows:
+            expire_date = r[5]
+            if not expire_date:
+                activated.append(r)
+            else:
+                try:
+                    exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M")
+                    if exp > now:
+                        activated.append(r)
+                except Exception:
+                    activated.append(r)
+        return activated
+    except Exception as e:
+        print("[GET VIPS ERR] " + str(e))
+        return []
+
+
+# ============================================
+# Group Owner
+# ============================================
+
+def set_group_owner(chat_id, user_id, first_name, username, added_by):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        c.execute("INSERT OR REPLACE INTO group_owners (chat_id, user_id, first_name, username, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)", (chat_id, user_id, first_name or "", username or "", added_by, now))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[SET GROUP OWNER ERR] " + str(e))
+        return False
+
+
+def remove_group_owner(chat_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM group_owners WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[REMOVE GROUP OWNER ERR] " + str(e))
+        return False
+
+
+def get_group_owner(chat_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, first_name, username, added_by, added_at FROM group_owners WHERE chat_id = ?", (chat_id,))
+        row = c.fetchone()
+        conn.close()
+        return row
+    except Exception as e:
+        print("[GET GROUP OWNER ERR] " + str(e))
+        return None
+
+
+def is_group_owner(chat_id, user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM group_owners WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        row = c.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        print("[IS GROUP OWNER ERR] " + str(e))
+        return False
+
+
+# ============================================
+# Deputy
+# ============================================
+
+def add_deputy(chat_id, user_id, first_name, username, added_by):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        c.execute("INSERT OR REPLACE INTO deputies (chat_id, user_id, first_name, username, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)", (chat_id, user_id, first_name or "", username or "", added_by, now))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[ADD DEPUTY ERR] " + str(e))
+        return False
+
+
+def remove_deputy(chat_id, user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM deputies WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[REMOVE DEPUTY ERR] " + str(e))
+        return False
+
+
+def is_deputy(chat_id, user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM deputies WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        row = c.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        print("[IS DEPUTY ERR] " + str(e))
+        return False
+
+
+def get_all_deputies(chat_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, first_name, username, added_by, added_at FROM deputies WHERE chat_id = ?", (chat_id,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[GET DEPUTIES ERR] " + str(e))
+        return []
+
+
+# ============================================
+# Deputy Permissions
+# ============================================
+
+def init_deputy_perms(chat_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        for key, label in DEPUTY_PERMS:
+            c.execute("INSERT OR IGNORE INTO deputy_perms (chat_id, perm_name, is_enabled) VALUES (?, ?, 1)", (chat_id, key))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("[INIT DEPUTY PERMS ERR] " + str(e))
+
+
+def get_deputy_perm(chat_id, perm_name):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT is_enabled FROM deputy_perms WHERE chat_id = ? AND perm_name = ?", (chat_id, perm_name))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return row[0] == 1
+        return True
+    except Exception as e:
+        print("[GET DEPUTY PERM ERR] " + str(e))
+        return True
+
+
+def toggle_deputy_perm(chat_id, perm_name):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT is_enabled FROM deputy_perms WHERE chat_id = ? AND perm_name = ?", (chat_id, perm_name))
+        row = c.fetchone()
+        if row:
+            new_val = 0 if row[0] else 1
+            c.execute("UPDATE deputy_perms SET is_enabled = ? WHERE chat_id = ? AND perm_name = ?", (new_val, chat_id, perm_name))
+        else:
+            new_val = 1
+            c.execute("INSERT INTO deputy_perms (chat_id, perm_name, is_enabled) VALUES (?, ?, 1)", (chat_id, perm_name))
+        conn.commit()
+        conn.close()
+        return new_val
+    except Exception as e:
+        print("[TOGGLE DEPUTY PERM ERR] " + str(e))
+        return 0
+
+
+def get_all_deputy_perms(chat_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT perm_name, is_enabled FROM deputy_perms WHERE chat_id = ?", (chat_id,))
+        rows = c.fetchall()
+        conn.close()
+        return {name: (val == 1) for name, val in rows}
+    except Exception as e:
+        print("[GET ALL DEPUTY PERMS ERR] " + str(e))
+        return {}
+
+
+# ============================================
+# User Permissions
+# ============================================
+
+def get_user_perms(chat_id, user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT perm_name, is_enabled FROM user_perms WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        rows = c.fetchall()
+        conn.close()
+        return {name: (val == 1) for name, val in rows}
+    except Exception as e:
+        print("[GET USER PERMS ERR] " + str(e))
+        return {}
+
+
+def toggle_user_perm(chat_id, user_id, perm_name):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT is_enabled FROM user_perms WHERE chat_id = ? AND user_id = ? AND perm_name = ?", (chat_id, user_id, perm_name))
+        row = c.fetchone()
+        if row:
+            new_val = 0 if row[0] else 1
+            c.execute("UPDATE user_perms SET is_enabled = ? WHERE chat_id = ? AND user_id = ? AND perm_name = ?", (new_val, chat_id, user_id, perm_name))
+        else:
+            new_val = 1
+            c.execute("INSERT INTO user_perms (chat_id, user_id, perm_name, is_enabled) VALUES (?, ?, ?, 1)", (chat_id, user_id, perm_name))
+        conn.commit()
+        conn.close()
+        return new_val
+    except Exception as e:
+        print("[TOGGLE USER PERM ERR] " + str(e))
+        return 0
+
+
+def has_user_perm(chat_id, user_id, perm_name, default=True):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT is_enabled FROM user_perms WHERE chat_id = ? AND user_id = ? AND perm_name = ?", (chat_id, user_id, perm_name))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return row[0] == 1
+        return default
+    except Exception as e:
+        print("[HAS USER PERM ERR] " + str(e))
+        return default
+
+
+# ============================================
+# NSFW Subscription (اشتراک قفل پورن)
+# ============================================
+
+def get_nsfw_sub(chat_id):
+    """اطلاعات اشتراک NSFW یه گروه"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        # ★ اول subscriptions (جدول اصلی)
+        try:
+            c.execute("SELECT expire_date, enabled FROM subscriptions WHERE chat_id = ? AND sub_type='nsfw'", (chat_id,))
+            row = c.fetchone()
+            if row:
+                conn.close()
+                return {"expire_date": row[0], "enabled": row[1] or 0, "added_at": None}
+        except Exception:
+            pass
+        # ★ fallback: nsfw_subs (جدول قدیمی)
+        try:
+            c.execute("SELECT expire_date, enabled, added_at FROM nsfw_subs WHERE chat_id = ?", (chat_id,))
+            row = c.fetchone()
+            if row:
+                conn.close()
+                return {"expire_date": row[0], "enabled": row[1] or 0, "added_at": row[2]}
+        except Exception:
+            pass
+        conn.close()
+        return {"expire_date": None, "enabled": 0, "added_at": None}
+    except Exception as e:
+        print("[GET NSFW SUB ERR] " + str(e))
+        return {"expire_date": None, "enabled": 0, "added_at": None}
+
+
+def set_nsfw_sub(chat_id, expire_date, enabled):
+    """ذخیره اشتراک NSFW (هر دو جدول)"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        # ★ subscriptions (جدول اصلی)
+        c.execute("""INSERT OR REPLACE INTO subscriptions 
+                    (chat_id, sub_type, expire_date, enabled, settings) 
+                    VALUES (?, 'nsfw', ?, ?, NULL)""", 
+                  (chat_id, expire_date, 1 if enabled else 0))
+        # ★ nsfw_subs (legacy — همگام نگه داریم)
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            c.execute("INSERT OR REPLACE INTO nsfw_subs (chat_id, expire_date, enabled, added_at) VALUES (?, ?, ?, ?)", 
+                     (chat_id, expire_date, 1 if enabled else 0, now))
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[SET NSFW SUB ERR] " + str(e))
+        return False
+
+
+def is_nsfw_sub_activated(chat_id):
+    """آیا اشتراک NSFW فعاله؟ (پشتیبانی از فرمت‌های مختلف تاریخ)"""
+    try:
+        sub = get_nsfw_sub(chat_id)
+        if not sub["enabled"]:
+            return False
+        expire = sub["expire_date"]
+        if not expire:
+            return False
+        # ★ امتحان هر دو فرمت (با و بدون ثانیه)
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                exp = datetime.strptime(expire, fmt)
+                return exp > datetime.now()
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
+
+
+def get_nsfw_remaining(chat_id):
+    """تعداد روزهای باقی مونده (پشتیبانی از فرمت‌های مختلف تاریخ)"""
+    try:
+        sub = get_nsfw_sub(chat_id)
+        if not sub["expire_date"]:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                exp = datetime.strptime(sub["expire_date"], fmt)
+                delta = exp - datetime.now()
+                if delta.total_seconds() <= 0:
+                    return 0
+                return delta.days
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+
+# ============================================
+# Purge
+# ============================================
+
+def get_purge_settings(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT purge_time, sections, enabled, last_run FROM purge_schedule WHERE chat_id = ?", (chat_id,))
+    row = c.fetchone()
+    if not row:
+        c.execute("INSERT INTO purge_schedule (chat_id, purge_time, sections, enabled) VALUES (?, ?, ?, 0)", (chat_id, "03:00", "messages"))
+        conn.commit()
+        row = ("03:00", "messages", 0, None)
+    conn.close()
+    return {"time": row[0] or "03:00", "sections": row[1] or "messages", "enabled": row[2] or 0, "last_run": row[3]}
+
+
+def set_purge_time(chat_id, purge_time):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO purge_schedule (chat_id, purge_time, sections) VALUES (?, ?, ?)", (chat_id, purge_time, "messages"))
+    c.execute("UPDATE purge_schedule SET purge_time = ? WHERE chat_id = ?", (purge_time, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def set_purge_enabled(chat_id, enabled):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO purge_schedule (chat_id, purge_time, sections) VALUES (?, ?, ?)", (chat_id, "03:00", "messages"))
+    c.execute("UPDATE purge_schedule SET enabled = ? WHERE chat_id = ?", ("1" if enabled else "0", chat_id))
+    conn.commit()
+    conn.close()
+
+
+def set_purge_sections(chat_id, sections):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO purge_schedule (chat_id, purge_time, sections) VALUES (?, ?, ?)", (chat_id, "03:00", sections))
+    c.execute("UPDATE purge_schedule SET sections = ? WHERE chat_id = ?", (sections, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def set_purge_last_run(chat_id, ts):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO purge_schedule (chat_id, purge_time, sections) VALUES (?, ?, ?)", (chat_id, "03:00", "messages"))
+    c.execute("UPDATE purge_schedule SET last_run = ? WHERE chat_id = ?", (ts, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def get_all_purge_enabled():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT chat_id, purge_time, sections FROM purge_schedule WHERE enabled = 1")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+# ========== Nicknames & Profiles Tables ==========
+def init_nicknames_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS nicknames (chat_id INTEGER, user_id INTEGER, nickname TEXT, enabled INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))")
+    conn.commit()
+    conn.close()
+
+def init_profiles_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS profiles (chat_id INTEGER, user_id INTEGER, raw_text TEXT, approved_by INTEGER, approved_at TEXT, PRIMARY KEY (chat_id, user_id))")
+    conn.commit()
+    conn.close()
+
+def set_nickname(chat_id, user_id, nickname):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO nicknames (chat_id, user_id, nickname, enabled) VALUES (?, ?, ?, COALESCE((SELECT enabled FROM nicknames WHERE chat_id=? AND user_id=?), 0))", (chat_id, user_id, nickname, chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+def get_nickname(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT nickname FROM nicknames WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def delete_nickname(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM nicknames WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+def is_nickname_enabled(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT enabled FROM nicknames WHERE chat_id=? LIMIT 1", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
+
+def toggle_nickname(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    current = 0
+    c.execute("SELECT enabled FROM nicknames WHERE chat_id=? LIMIT 1", (chat_id,))
+    row = c.fetchone()
+    if row:
+        current = row[0]
+    new_val = 0 if current else 1
+    c.execute("UPDATE nicknames SET enabled=? WHERE chat_id=?", (new_val, chat_id))
+    if c.rowcount == 0:
+        c.execute("INSERT INTO nicknames (chat_id, user_id, nickname, enabled) VALUES (?, 0, '', ?)", (chat_id, new_val))
+    conn.commit()
+    conn.close()
+    return new_val
+
+def set_profile(chat_id, user_id, raw_text, approved_by):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    from datetime import datetime
+    c.execute("INSERT OR REPLACE INTO profiles (chat_id, user_id, raw_text, approved_by, approved_at) VALUES (?, ?, ?, ?, ?)", (chat_id, user_id, raw_text, approved_by, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+
+def get_profile(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT raw_text, approved_by, approved_at FROM profiles WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def delete_profile(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM profiles WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    conn.commit()
+    conn.close()
+
+# ========== End of Nicknames & Profiles ==========
+
+def check_active(chat_id):
+    """بررسی فعال بودن گروه بر اساس تاریخ انقضا و وضعیت activated"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT expire_date, activated FROM groups WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return False
+    
+    expire_date, activated = row
+    if not activated:
+        return False
+    
+    if expire_date:
+        from datetime import datetime
+        try:
+            exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M")
+            if exp < datetime.now():
+                return False
+        except Exception:
+            pass
+    
+    return True
+
+
+
+# ========== Subscriptions System ==========
+def init_subscriptions_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS subscriptions (
+        chat_id INTEGER,
+        sub_type TEXT,
+        expire_date TEXT,
+        enabled INTEGER DEFAULT 0,
+        settings TEXT,
+        PRIMARY KEY (chat_id, sub_type)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def set_subscription(chat_id, sub_type, expire_date, enabled=1, settings=None):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO subscriptions (chat_id, sub_type, expire_date, enabled, settings) VALUES (?, ?, ?, ?, ?)",
+              (chat_id, sub_type, expire_date, enabled, settings))
+    conn.commit()
+    conn.close()
+
+
+def get_subscription(chat_id, sub_type):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT expire_date, enabled, settings FROM subscriptions WHERE chat_id=? AND sub_type=?",
+              (chat_id, sub_type))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def is_sub_active(chat_id, sub_type):
+    row = get_subscription(chat_id, sub_type)
+    if not row:
+        return False
+    expire_date, enabled, settings = row
+    if not enabled:
+        return False
+    if expire_date:
+        try:
+            from datetime import datetime
+            exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M:%S")
+            if exp < datetime.now():
+                return False
+        except Exception:
+            try:
+                from datetime import datetime
+                exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M")
+                if exp < datetime.now():
+                    return False
+            except Exception:
+                pass
+    return True
+
+
+def get_sub_days_remaining(chat_id, sub_type):
+    row = get_subscription(chat_id, sub_type)
+    if not row:
+        return 0
+    expire_date, enabled, settings = row
+    if not enabled or not expire_date:
+        return 0
+    try:
+        from datetime import datetime
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                exp = datetime.strptime(expire_date, fmt)
+                delta = exp - datetime.now()
+                return max(0, delta.days)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return 0
+
+
+def set_vcall_interval(chat_id, minutes):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO subscriptions (chat_id, sub_type, enabled, settings) VALUES (?, 'vcall', 0, ?)",
+              (chat_id, str(minutes)))
+    c.execute("UPDATE subscriptions SET settings=? WHERE chat_id=? AND sub_type='vcall'",
+              (str(minutes), chat_id))
+    conn.commit()
+    conn.close()
+
+
+def get_vcall_interval(chat_id):
+    row = get_subscription(chat_id, 'vcall')
+    if not row or not row[2]:
+        return 5
+    try:
+        return int(row[2])
+    except Exception:
+        return 5
+
+
+# ========== End Subscriptions ==========
+
+
+
+def init_subscriptions_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS subscriptions (chat_id INTEGER, sub_type TEXT, expire_date TEXT, enabled INTEGER DEFAULT 0, settings TEXT, PRIMARY KEY (chat_id, sub_type))")
+    conn.commit()
+    conn.close()
+
+
+def set_subscription(chat_id, sub_type, expire_date, enabled=1, settings=None):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO subscriptions (chat_id, sub_type, expire_date, enabled, settings) VALUES (?, ?, ?, ?, ?)", (chat_id, sub_type, expire_date, enabled, settings))
+    conn.commit()
+    conn.close()
+
+
+def get_subscription(chat_id, sub_type):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT expire_date, enabled, settings FROM subscriptions WHERE chat_id=? AND sub_type=?", (chat_id, sub_type))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def is_sub_active(chat_id, sub_type):
+    row = get_subscription(chat_id, sub_type)
+    if not row:
+        return False
+    expire_date, enabled, settings = row
+    if not enabled:
+        return False
+    if expire_date:
+        from datetime import datetime
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                exp = datetime.strptime(expire_date, fmt)
+                if exp < datetime.now():
+                    return False
+                break
+            except Exception:
+                continue
+    return True
+
+
+def get_sub_days_remaining(chat_id, sub_type):
+    row = get_subscription(chat_id, sub_type)
+    if not row:
+        return 0
+    expire_date, enabled, settings = row
+    if not enabled or not expire_date:
+        return 0
+    from datetime import datetime
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            exp = datetime.strptime(expire_date, fmt)
+            delta = exp - datetime.now()
+            return max(0, delta.days)
+        except Exception:
+            continue
+    return 0
+
+
+def set_vcall_interval(chat_id, minutes):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO subscriptions (chat_id, sub_type, enabled, settings) VALUES (?, 'vcall', 0, ?)", (chat_id, str(minutes)))
+    c.execute("UPDATE subscriptions SET settings=? WHERE chat_id=? AND sub_type='vcall'", (str(minutes), chat_id))
+    conn.commit()
+    conn.close()
+
+
+def get_vcall_interval(chat_id):
+    row = get_subscription(chat_id, 'vcall')
+    if not row or not row[2]:
+        return 5
+    try:
+        return int(row[2])
+    except Exception:
+        return 5
+
+
+# ========== Admin/Deputy Permissions ==========
+def init_admin_perms_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS admin_permissions (
+        chat_id INTEGER,
+        user_id INTEGER,
+        role TEXT,
+        perm_name TEXT,
+        enabled INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id, perm_name)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def set_admin_perm(chat_id, user_id, role, perm_name, enabled):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO admin_permissions (chat_id, user_id, role, perm_name, enabled) VALUES (?, ?, ?, ?, ?)",
+              (chat_id, user_id, role, perm_name, enabled))
+    conn.commit()
+    conn.close()
+
+
+def get_admin_perm(chat_id, user_id, perm_name):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT enabled FROM admin_permissions WHERE chat_id=? AND user_id=? AND perm_name=?",
+              (chat_id, user_id, perm_name))
+    row = c.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
+
+
+def get_all_perms(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT perm_name, enabled FROM admin_permissions WHERE chat_id=? AND user_id=?",
+              (chat_id, user_id))
+    rows = c.fetchall()
+    conn.close()
+    return {r[0]: bool(r[1]) for r in rows}
+
+
+def is_admin_or_deputy(chat_id, user_id, perm_name):
+    return get_admin_perm(chat_id, user_id, perm_name)
+# ========== End Admin/Deputy Permissions ==========
+
+
+def extend_subscription(chat_id, sub_type, days):
+    """اگه اشتراک فعاله، روزها رو به تاریخ فعلی اضافه می‌کنه. وگرنه از الان شروع می‌کنه."""
+    from datetime import datetime, timedelta
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT expire_date, enabled FROM subscriptions WHERE chat_id=? AND sub_type=?", (chat_id, sub_type))
+    row = c.fetchone()
+    
+    base = datetime.now()
+    was_active = False
+    if row and row[1]:
+        try:
+            exp = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+            if exp > datetime.now():
+                base = exp
+                was_active = True
+        except Exception:
+            try:
+                exp = datetime.strptime(row[0], "%Y-%m-%d %H:%M")
+                if exp > datetime.now():
+                    base = exp
+                    was_active = True
+            except Exception:
+                pass
+    
+    new_exp = (base + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT OR REPLACE INTO subscriptions (chat_id, sub_type, expire_date, enabled) VALUES (?, ?, ?, 1)", (chat_id, sub_type, new_exp))
+    conn.commit()
+    conn.close()
+    total_days = (base + timedelta(days=days) - datetime.now()).days
+    return new_exp, total_days, was_active
+
+
+
+# ========== Notification Settings ==========
+def init_notif_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS notification_settings (
+        chat_id INTEGER,
+        notif_type TEXT,
+        enabled INTEGER DEFAULT 1,
+        PRIMARY KEY (chat_id, notif_type)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def set_notif(chat_id, notif_type, enabled):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO notification_settings (chat_id, notif_type, enabled) VALUES (?, ?, ?)",
+              (chat_id, notif_type, enabled))
+    conn.commit()
+    conn.close()
+
+
+def get_notif(chat_id, notif_type):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT enabled FROM notification_settings WHERE chat_id=? AND notif_type=?",
+              (chat_id, notif_type))
+    row = c.fetchone()
+    conn.close()
+    if row is None:
+        return True  # پیش‌فرض: فعال
+    return bool(row[0])
+
+
+def get_all_notifs(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT notif_type, enabled FROM notification_settings WHERE chat_id=?", (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    result = {}
+    types = ["ban", "mute", "kick", "warn", "delete", "bot_leave", "owner_leave", "expiry"]
+    for t in types:
+        result[t] = True  # پیش‌فرض
+    for r in rows:
+        result[r[0]] = bool(r[1])
+    return result
+# ========== End Notification Settings ==========
+
+
+# ========== Trusted Bots (Whitelist) ==========
+def init_trusted_bots_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS trusted_bots (
+        chat_id INTEGER,
+        bot_id INTEGER,
+        bot_name TEXT,
+        PRIMARY KEY (chat_id, bot_id)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def add_trusted_bot(chat_id, bot_id, bot_name):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO trusted_bots (chat_id, bot_id, bot_name) VALUES (?, ?, ?)",
+              (chat_id, bot_id, bot_name))
+    conn.commit()
+    conn.close()
+
+
+def remove_trusted_bot(chat_id, bot_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM trusted_bots WHERE chat_id=? AND bot_id=?", (chat_id, bot_id))
+    conn.commit()
+    conn.close()
+
+
+def is_trusted_bot(chat_id, bot_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM trusted_bots WHERE chat_id=? AND bot_id=?", (chat_id, bot_id))
+    row = c.fetchone()
+    conn.close()
+    return bool(row)
+
+
+def get_trusted_bots(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT bot_id, bot_name FROM trusted_bots WHERE chat_id=?", (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def is_bot_allowed(chat_id):
+    """چک کن که ربات‌ها به طور کلی مجاز هستن یا نه"""
+    return get_setting(chat_id, "allow_bots", "0") == "1"
+# ========== End Trusted Bots ==========
+
+
+# ========== Force Join & Force Payment ==========
+def init_force_tables():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    # اجبار به عضویت (چند تا کانال/گروه)
+    c.execute("""CREATE TABLE IF NOT EXISTS force_join (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        force_type TEXT,
+        target_id INTEGER,
+        target_link TEXT,
+        target_name TEXT
+    )""")
+    # تنظیمات اجبار به پرداخت
+    c.execute("""CREATE TABLE IF NOT EXISTS force_payment (
+        chat_id INTEGER PRIMARY KEY,
+        enabled INTEGER DEFAULT 0,
+        amount TEXT,
+        payment_method TEXT,
+        card_number TEXT,
+        card_holder TEXT,
+        gateway_name TEXT,
+        gateway_api_key TEXT,
+        gateway_merchant_id TEXT
+    )""")
+    # تأیید کاربر
+    c.execute("""CREATE TABLE IF NOT EXISTS user_verification (
+        chat_id INTEGER,
+        user_id INTEGER,
+        verified INTEGER DEFAULT 0,
+        method TEXT,
+        verified_at TEXT,
+        receipt_file_id TEXT,
+        PRIMARY KEY (chat_id, user_id)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def add_force_join(chat_id, force_type, target_id, target_link, target_name):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO force_join (chat_id, force_type, target_id, target_link, target_name) VALUES (?, ?, ?, ?, ?)",
+              (chat_id, force_type, target_id, target_link, target_name))
+    conn.commit()
+    conn.close()
+
+
+def get_force_joins(chat_id, force_type=None):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    if force_type:
+        c.execute("SELECT id, force_type, target_id, target_link, target_name FROM force_join WHERE chat_id=? AND force_type=?", (chat_id, force_type))
+    else:
+        c.execute("SELECT id, force_type, target_id, target_link, target_name FROM force_join WHERE chat_id=?", (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def remove_force_join(force_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM force_join WHERE id=?", (force_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_payment_settings(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT enabled, amount, payment_method, card_number, card_holder, gateway_name, gateway_api_key, gateway_merchant_id FROM force_payment WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def set_payment_setting(chat_id, key, value):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO force_payment (chat_id) VALUES (?)", (chat_id,))
+    c.execute(f"UPDATE force_payment SET {key}=? WHERE chat_id=?", (value, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def is_user_verified(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT verified FROM user_verification WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
+
+
+def set_user_verified(chat_id, user_id, method="join", receipt_file_id=None):
+    from datetime import datetime
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO user_verification (chat_id, user_id, verified, method, verified_at, receipt_file_id) VALUES (?, ?, 1, ?, ?, ?)",
+              (chat_id, user_id, method, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), receipt_file_id))
+    conn.commit()
+    conn.close()
+
+
+def is_force_enabled(chat_id):
+    """آیا اجبار عضویت فعاله؟"""
+    joins = get_force_joins(chat_id)
+    return len(joins) > 0
+# ========== End Force Join & Force Payment ==========
+
+
+# ========== Force Join & Force Payment ==========
+def init_force_tables():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    # اجبار به عضویت (چند تا کانال/گروه)
+    c.execute("""CREATE TABLE IF NOT EXISTS force_join (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        force_type TEXT,
+        target_id INTEGER,
+        target_link TEXT,
+        target_name TEXT
+    )""")
+    # تنظیمات اجبار به پرداخت
+    c.execute("""CREATE TABLE IF NOT EXISTS force_payment (
+        chat_id INTEGER PRIMARY KEY,
+        enabled INTEGER DEFAULT 0,
+        amount TEXT,
+        payment_method TEXT,
+        card_number TEXT,
+        card_holder TEXT,
+        gateway_name TEXT,
+        gateway_api_key TEXT,
+        gateway_merchant_id TEXT
+    )""")
+    # تأیید کاربر
+    c.execute("""CREATE TABLE IF NOT EXISTS user_verification (
+        chat_id INTEGER,
+        user_id INTEGER,
+        verified INTEGER DEFAULT 0,
+        method TEXT,
+        verified_at TEXT,
+        receipt_file_id TEXT,
+        PRIMARY KEY (chat_id, user_id)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def add_force_join(chat_id, force_type, target_id, target_link, target_name):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO force_join (chat_id, force_type, target_id, target_link, target_name) VALUES (?, ?, ?, ?, ?)",
+              (chat_id, force_type, target_id, target_link, target_name))
+    conn.commit()
+    conn.close()
+
+
+def get_force_joins(chat_id, force_type=None):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    if force_type:
+        c.execute("SELECT id, force_type, target_id, target_link, target_name FROM force_join WHERE chat_id=? AND force_type=?", (chat_id, force_type))
+    else:
+        c.execute("SELECT id, force_type, target_id, target_link, target_name FROM force_join WHERE chat_id=?", (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def remove_force_join(force_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM force_join WHERE id=?", (force_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_payment_settings(chat_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT enabled, amount, payment_method, card_number, card_holder, gateway_name, gateway_api_key, gateway_merchant_id FROM force_payment WHERE chat_id=?", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def set_payment_setting(chat_id, key, value):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO force_payment (chat_id) VALUES (?)", (chat_id,))
+    c.execute(f"UPDATE force_payment SET {key}=? WHERE chat_id=?", (value, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def is_user_verified(chat_id, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT verified FROM user_verification WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    row = c.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
+
+
+def set_user_verified(chat_id, user_id, method="join", receipt_file_id=None):
+    from datetime import datetime
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO user_verification (chat_id, user_id, verified, method, verified_at, receipt_file_id) VALUES (?, ?, 1, ?, ?, ?)",
+              (chat_id, user_id, method, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), receipt_file_id))
+    conn.commit()
+    conn.close()
+
+
+def is_force_enabled(chat_id):
+    """آیا اجبار عضویت فعاله؟"""
+    joins = get_force_joins(chat_id)
+    return len(joins) > 0
+# ========== End Force Join & Force Payment ==========
+
+
+# ============ توابع آمار کال (برای ربات موزیک پلیر) ============
+
+def save_voice_call_report(chat_id, date, total_seconds, users_list):
+    """
+    ذخیره گزارش آمار کال یک روز مشخص.
+    users_list: لیستی از dict با این فرمت:
+        {"user_id": int, "username": str, "first_name": str, "total_seconds": int, "session_count": int}
+    """
+    from datetime import datetime
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # ذخیره گزارش کلی
+    c.execute("""INSERT OR REPLACE INTO voice_call_reports (chat_id, date, total_seconds, received_at)
+                 VALUES (?, ?, ?, ?)""", (chat_id, date, total_seconds, now))
+    
+    # ذخیره آمار هر کاربر
+    for u in users_list:
+        c.execute("""INSERT OR REPLACE INTO voice_call_stats 
+                     (chat_id, user_id, username, first_name, date, total_seconds, session_count, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (chat_id, u.get("user_id"), u.get("username"), u.get("first_name"),
+                   date, u.get("total_seconds", 0), u.get("session_count", 0), now))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_voice_call_stats(chat_id, date):
+    """گرفتن آمار کال یک گروه در یک تاریخ مشخص"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT user_id, username, first_name, total_seconds, session_count 
+                 FROM voice_call_stats WHERE chat_id=? AND date=?
+                 ORDER BY total_seconds DESC""", (chat_id, date))
+    rows = c.fetchall()
+    c.execute("SELECT total_seconds FROM voice_call_reports WHERE chat_id=? AND date=?", (chat_id, date))
+    total_row = c.fetchone()
+    total = total_row[0] if total_row else 0
+    conn.close()
+    return total, rows
+
+
+def get_voice_call_last_date(chat_id):
+    """گرفتن آخرین تاریخی که آمار کال براش ثبت شده"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT date FROM voice_call_reports WHERE chat_id=? ORDER BY date DESC LIMIT 1", (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+# ============ توابع آمار پیام‌ها ============
+
+def init_msg_stats_tables():
+    """ساخت جدول‌های آمار پیام"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS msg_stats_daily (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        first_name TEXT,
+        date TEXT NOT NULL,
+        msg_count INTEGER DEFAULT 0,
+        ad_count INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id, date)
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS msg_stats_total (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        first_name TEXT,
+        msg_count INTEGER DEFAULT 0,
+        ad_count INTEGER DEFAULT 0,
+        updated_at TEXT,
+        PRIMARY KEY (chat_id, user_id)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def increment_msg(chat_id, user_id, username, first_name, is_ad=False):
+    """افزودن یه پیام به آمار کاربر"""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        ad_inc = 1 if is_ad else 0
+        c.execute("""INSERT INTO msg_stats_daily (chat_id, user_id, username, first_name, date, msg_count, ad_count)
+                     VALUES (?, ?, ?, ?, ?, 1, ?)
+                     ON CONFLICT(chat_id, user_id, date) DO UPDATE SET
+                     msg_count = msg_count + 1,
+                     ad_count = ad_count + ?,
+                     username = excluded.username,
+                     first_name = excluded.first_name""",
+                  (chat_id, user_id, username, first_name, today, ad_inc, ad_inc))
+        c.execute("""INSERT INTO msg_stats_total (chat_id, user_id, username, first_name, msg_count, ad_count, updated_at)
+                     VALUES (?, ?, ?, ?, 1, ?, ?)
+                     ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                     msg_count = msg_count + 1,
+                     ad_count = ad_count + ?,
+                     username = excluded.username,
+                     first_name = excluded.first_name,
+                     updated_at = excluded.updated_at""",
+                  (chat_id, user_id, username, first_name, ad_inc, now, ad_inc))
+        conn.commit()
+    except Exception as e:
+        print("[INC MSG ERR] " + str(e))
+    finally:
+        conn.close()
+
+
+def get_top_active_daily(chat_id, date, limit=10):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT user_id, username, first_name, msg_count FROM msg_stats_daily
+                 WHERE chat_id=? AND date=? ORDER BY msg_count DESC LIMIT ?""",
+              (chat_id, date, limit))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_top_active_total(chat_id, limit=10):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT user_id, username, first_name, msg_count FROM msg_stats_total
+                 WHERE chat_id=? ORDER BY msg_count DESC LIMIT ?""",
+              (chat_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_top_adders_daily(chat_id, date, limit=10):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT user_id, username, first_name, ad_count FROM msg_stats_daily
+                 WHERE chat_id=? AND date=? AND ad_count > 0 ORDER BY ad_count DESC LIMIT ?""",
+              (chat_id, date, limit))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_top_adders_total(chat_id, limit=10):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT user_id, username, first_name, ad_count FROM msg_stats_total
+                 WHERE chat_id=? AND ad_count > 0 ORDER BY ad_count DESC LIMIT ?""",
+              (chat_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+# ============ توابع رصد رویدادهای گروه (Group Events) ============
+
+def init_group_events_table():
+    """ساخت جدول رویدادهای گروه"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS group_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        target_user_id INTEGER NOT NULL,
+        target_username TEXT,
+        target_first_name TEXT,
+        actor_user_id INTEGER,
+        actor_username TEXT,
+        actor_first_name TEXT,
+        date TEXT NOT NULL,
+        created_at TEXT
+    )""")
+    c.execute("""CREATE INDEX IF NOT EXISTS idx_group_events_chat_date
+                 ON group_events(chat_id, date)""")
+    conn.commit()
+    conn.close()
+
+
+def log_group_event(chat_id, event_type, target_user, actor_user=None):
+    """ثبت یه رویداد گروه"""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        t_id = target_user.get("user_id")
+        t_un = target_user.get("username") or ""
+        t_fn = target_user.get("first_name") or ""
+        a_id = actor_user.get("user_id") if actor_user else None
+        a_un = (actor_user.get("username") or "") if actor_user else ""
+        a_fn = (actor_user.get("first_name") or "") if actor_user else ""
+        c.execute("""INSERT INTO group_events
+                     (chat_id, event_type, target_user_id, target_username, target_first_name,
+                      actor_user_id, actor_username, actor_first_name, date, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (chat_id, event_type, t_id, t_un, t_fn, a_id, a_un, a_fn, today, now))
+        conn.commit()
+    except Exception as e:
+        print("[LOG EVENT ERR] " + str(e))
+    finally:
+        conn.close()
+
+
+def get_daily_events_summary(chat_id, date):
+    """خلاصه رویدادهای امروز"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT event_type, COUNT(*) FROM group_events
+                 WHERE chat_id=? AND date=? GROUP BY event_type""", (chat_id, date))
+    result = {"join": 0, "leave": 0, "kick": 0, "invite": 0}
+    for et, cnt in c.fetchall():
+        result[et] = cnt
+    conn.close()
+    return result
+
+
+def get_total_events_summary(chat_id):
+    """خلاصه کل رویدادها"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT event_type, COUNT(*) FROM group_events
+                 WHERE chat_id=? GROUP BY event_type""", (chat_id,))
+    result = {"join": 0, "leave": 0, "kick": 0, "invite": 0}
+    for et, cnt in c.fetchall():
+        result[et] = cnt
+    conn.close()
+    return result
+
+
+# ============ توابع جوین اجباری (Force Join) ============
+
+def init_fj_tables():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS fj_exemptions (
+        user_id INTEGER PRIMARY KEY,
+        exempted_by INTEGER,
+        exempted_at TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS fj_admin_perms (
+        user_id INTEGER PRIMARY KEY,
+        can_exempt INTEGER DEFAULT 0
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def add_fj_exemption(user_id, exempted_by):
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""INSERT OR REPLACE INTO fj_exemptions (user_id, exempted_by, exempted_at)
+                 VALUES (?, ?, ?)""", (user_id, exempted_by, now))
+    conn.commit()
+    conn.close()
+
+
+def remove_fj_exemption(user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM fj_exemptions WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def is_fj_exempt(user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT user_id FROM fj_exemptions WHERE user_id=?", (user_id,))
+        r = c.fetchone()
+        conn.close()
+        return r is not None
+    except Exception:
+        conn.close()
+        return False
+
+
+def set_fj_admin_perm(user_id, can_exempt):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""INSERT OR REPLACE INTO fj_admin_perms (user_id, can_exempt)
+                 VALUES (?, ?)""", (user_id, 1 if can_exempt else 0))
+    conn.commit()
+    conn.close()
+
+
+def can_exempt_fj(user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT can_exempt FROM fj_admin_perms WHERE user_id=?", (user_id,))
+        r = c.fetchone()
+        conn.close()
+        return bool(r and r[0])
+    except Exception:
+        conn.close()
+        return False
+
+
+def get_global_force_join():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("""SELECT id, target_id, target_link, target_name FROM force_join
+                     WHERE chat_id=0 LIMIT 1""")
+        r = c.fetchone()
+        conn.close()
+        return r
+    except Exception:
+        conn.close()
+        return None
+
+
+def set_global_force_join(target_id, target_link, target_name):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM force_join WHERE chat_id=0")
+    c.execute("""INSERT INTO force_join (chat_id, force_type, target_id, target_link, target_name)
+                 VALUES (0, 'global', ?, ?, ?)""", (target_id, target_link, target_name))
+    conn.commit()
+    conn.close()
+
+
+def remove_global_force_join():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM force_join WHERE chat_id=0")
+    conn.commit()
+    conn.close()
+
+
+def is_fj_enabled():
+    """چک کن آیا جوین اجباری روشنه"""
+    try:
+        v = get_setting(0, "fj_enabled", "0")
+        return str(v) == "1"
+    except Exception:
+        return False
+
+
+def set_fj_enabled(enabled):
+    """روشن/خاموش کردن جوین اجباری"""
+    try:
+        set_setting(0, "fj_enabled", "1" if enabled else "0")
+        return True
+    except Exception as e:
+        print("[SET FJ ENABLED ERR] " + str(e))
+        return False
+
+
+# ============ تابع کمکی: چک سازنده/سودو ============
+
+def is_bot_owner_or_sudo(user_id):
+    """چک کن آیا کاربر سازنده یا سودو است"""
+    try:
+        from config import OWNER_ID
+        if user_id == OWNER_ID:
+            return True
+    except Exception:
+        pass
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM bot_admins WHERE user_id=?", (user_id,))
+        r = c.fetchone()
+        conn.close()
+        return r is not None
+    except Exception as e:
+        print("[IS OWNER/SUDO ERR] " + str(e))
+        return False
+
+
+def get_expire(chat_id):
+    """گرفتن تاریخ انقضای اشتراک گروه (فقط اگر activated=1 باشد)"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT expire_date, activated FROM groups WHERE chat_id=?", (chat_id,))
+        r = c.fetchone()
+        conn.close()
+        if r and r[1] and r[0]:
+            return r[0]
+        return None
+    except Exception as e:
+        print("[GET EXPIRE ERR] " + str(e))
+        return None
+
+
+# ============ Global Blacklist ============
+def init_global_blacklist_tables():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS global_blacklist (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        added_by INTEGER,
+        added_at TEXT,
+        reason TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS global_blacklist_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        chat_id INTEGER,
+        action TEXT,
+        performed_by INTEGER,
+        performed_at TEXT
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def add_to_global_blacklist(user_id, username, first_name, added_by, reason=""):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""INSERT OR REPLACE INTO global_blacklist
+                     (user_id, username, first_name, added_by, added_at, reason)
+                     VALUES (?, ?, ?, ?, ?, ?)""",
+                  (user_id, username or "", first_name or "", added_by, now, reason))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[GBL ADD ERR]", str(e))
+        return False
+
+
+def remove_from_global_blacklist(user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM global_blacklist WHERE user_id = ?", (user_id,))
+        conn.commit()
+        affected = c.rowcount
+        conn.close()
+        return affected > 0
+    except Exception as e:
+        print("[GBL DEL ERR]", str(e))
+        return False
+
+
+def is_global_blacklisted(user_id, username=None):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM global_blacklist WHERE user_id = ?", (user_id,))
+        if c.fetchone():
+            conn.close()
+            return True
+        if username:
+            uname = username.lstrip("@").lower()
+            c.execute("SELECT user_id FROM global_blacklist WHERE LOWER(username) = ?", (uname,))
+            if c.fetchone():
+                conn.close()
+                return True
+        conn.close()
+        return False
+    except Exception as e:
+        print("[GBL CHK ERR]", str(e))
+        return False
+
+
+def get_all_global_blacklist():
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, first_name, added_by, added_at, reason FROM global_blacklist ORDER BY added_at DESC")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[GBL LIST ERR]", str(e))
+        return []
+
+
+def log_gbl_action(user_id, chat_id, action, performed_by):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""INSERT INTO global_blacklist_log
+                     (user_id, chat_id, action, performed_by, performed_at)
+                     VALUES (?, ?, ?, ?, ?)""",
+                  (user_id, chat_id, action, performed_by, now))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("[GBL LOG ERR]", str(e))
+
+
+# ============ Spam Tracker (for auto global ban) ============
+def init_spam_tracker_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS spam_tracker (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        chat_id INTEGER,
+        reason TEXT,
+        banned_by INTEGER,
+        banned_at TEXT,
+        is_global INTEGER DEFAULT 0
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_spam_user ON spam_tracker(user_id)")
+    conn.commit()
+    conn.close()
+
+
+def record_spam_ban(user_id, chat_id, reason, banned_by):
+    """ثبت بن کاربر (برای تشخیص اسپمر مکرر)"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""INSERT INTO spam_tracker (user_id, chat_id, reason, banned_by, banned_at, is_global)
+                     VALUES (?, ?, ?, ?, ?, 0)""",
+                  (user_id, chat_id, reason or "", banned_by or 0, now))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[SPAM RECORD ERR]", str(e))
+        return False
+
+
+def get_spam_count(user_id):
+    """تعداد بن‌های کاربر"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM spam_tracker WHERE user_id=? AND is_global=0", (user_id,))
+        cnt = c.fetchone()[0]
+        conn.close()
+        return cnt
+    except Exception as e:
+        print("[SPAM COUNT ERR]", str(e))
+        return 0
+
+
+def get_spam_record(user_id):
+    """لیست همه رکوردهای بن کاربر"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT chat_id, reason, banned_by, banned_at, is_global
+                     FROM spam_tracker WHERE user_id=?
+                     ORDER BY banned_at DESC""", (user_id,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[SPAM RECORD ERR]", str(e))
+        return []
+
+
+def get_all_spam_users(min_count=1):
+    """کاربرانی که حداقل N بار بن شدن"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT user_id, COUNT(*) as cnt FROM spam_tracker
+                     WHERE is_global=0
+                     GROUP BY user_id HAVING cnt >= ?
+                     ORDER BY cnt DESC""", (min_count,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[SPAM ALL ERR]", str(e))
+        return []
+
+
+def remove_spam_record(user_id, chat_id=None):
+    """حذف رکورد بن (وقتی unban شد یا اشتباه بود)"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        if chat_id:
+            c.execute("DELETE FROM spam_tracker WHERE user_id=? AND chat_id=?", (user_id, chat_id))
+        else:
+            c.execute("DELETE FROM spam_tracker WHERE user_id=?", (user_id,))
+        cnt = c.rowcount
+        conn.commit()
+        conn.close()
+        return cnt
+    except Exception as e:
+        print("[SPAM DEL ERR]", str(e))
+        return 0
+
+
+def mark_spam_global(user_id):
+    """علامت زدن رکوردهای کاربر به عنوان global"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE spam_tracker SET is_global=1 WHERE user_id=?", (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[SPAM MARK ERR]", str(e))
+        return False
+
+
+def get_setting_int(chat_id, name, default=0):
+    """گرفتن تنظیم عددی"""
+    try:
+        val = get_setting(chat_id, name, str(default))
+        return int(val)
+    except Exception:
+        return default
+
+
+# ============ User Contacts (بانک اطلاعاتی کاربران) ============
+def init_user_contacts_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS user_contacts (
+        user_id INTEGER PRIMARY KEY,
+        first_name TEXT,
+        last_name TEXT,
+        username TEXT,
+        language_code TEXT,
+        is_premium INTEGER DEFAULT 0,
+        has_started_bot INTEGER DEFAULT 0,
+        first_seen TEXT,
+        last_seen TEXT,
+        groups_count INTEGER DEFAULT 0,
+        source TEXT
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_contacts_started ON user_contacts(has_started_bot)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_contacts_username ON user_contacts(username)")
+    conn.commit()
+    conn.close()
+
+
+def upsert_user_contact(user_id, first_name=None, last_name=None, username=None,
+                        language_code=None, is_premium=None, has_started=None, source=None):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("SELECT user_id, has_started_bot FROM user_contacts WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+        if row:
+            updates = ["last_seen=?"]
+            params = [now]
+            if first_name: updates.append("first_name=?"); params.append(first_name)
+            if last_name is not None: updates.append("last_name=?"); params.append(last_name)
+            if username is not None: updates.append("username=?"); params.append(username)
+            if language_code: updates.append("language_code=?"); params.append(language_code)
+            if is_premium is not None: updates.append("is_premium=?"); params.append(1 if is_premium else 0)
+            if has_started is not None: updates.append("has_started_bot=?"); params.append(1 if has_started else 0)
+            if source: updates.append("source=COALESCE(source,?)"); params.append(source)
+            params.append(user_id)
+            c.execute(f"UPDATE user_contacts SET {', '.join(updates)} WHERE user_id=?", params)
+        else:
+            c.execute("""INSERT INTO user_contacts
+                (user_id, first_name, last_name, username, language_code, is_premium,
+                 has_started_bot, first_seen, last_seen, groups_count, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+                (user_id, first_name or "", last_name or "", username or "",
+                 language_code or "", 1 if is_premium else 0,
+                 1 if has_started else 0, now, now, source or ""))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[UPSERT CONTACT ERR]", str(e))
+        return False
+
+
+def increment_user_groups_count(user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE user_contacts SET groups_count = groups_count + 1 WHERE user_id=?", (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("[INC GROUPS ERR]", str(e))
+
+
+def get_user_contact(user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT user_id, first_name, last_name, username, has_started_bot,
+                     first_seen, last_seen, groups_count, is_premium
+                     FROM user_contacts WHERE user_id=?""", (user_id,))
+        row = c.fetchone()
+        conn.close()
+        return row
+    except Exception as e:
+        print("[GET CONTACT ERR]", str(e))
+        return None
+
+
+def get_contacts_stats():
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM user_contacts")
+        total = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM user_contacts WHERE has_started_bot=1")
+        started = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM user_contacts WHERE groups_count > 0")
+        in_groups = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM user_contacts WHERE is_premium=1")
+        premium = c.fetchone()[0]
+        conn.close()
+        return {"total": total, "started": started, "in_groups": in_groups, "premium": premium}
+    except Exception as e:
+        print("[STATS ERR]", str(e))
+        return {"total": 0, "started": 0, "in_groups": 0, "premium": 0}
+
+
+def get_all_user_contacts(started_only=False):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        if started_only:
+            c.execute("""SELECT user_id, first_name, last_name, username, has_started_bot,
+                         first_seen, last_seen, groups_count
+                         FROM user_contacts WHERE has_started_bot=1 ORDER BY last_seen DESC""")
+        else:
+            c.execute("""SELECT user_id, first_name, last_name, username, has_started_bot,
+                         first_seen, last_seen, groups_count
+                         FROM user_contacts ORDER BY last_seen DESC""")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[GET ALL CONTACTS ERR]", str(e))
+        return []
+
+
+def delete_user_contact(user_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM user_contacts WHERE user_id=?", (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[DEL CONTACT ERR]", str(e))
+        return False
+
+
+# ============ System Management Functions ============
+def vacuum_database():
+    """بهینه‌سازی دیتابیس با VACUUM"""
+    try:
+        size_before = os.path.getsize(DATABASE_PATH)
+        conn = sqlite3.connect(DATABASE_PATH)
+        conn.execute("VACUUM")
+        conn.close()
+        size_after = os.path.getsize(DATABASE_PATH)
+        return size_before, size_after, True
+    except Exception as e:
+        print("[VACUUM ERR]", str(e))
+        return 0, 0, False
+
+
+def check_db_integrity():
+    """بررسی سلامت دیتابیس"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("PRAGMA integrity_check")
+        result = c.fetchone()[0]
+        conn.close()
+        return result
+    except Exception as e:
+        print("[INTEGRITY ERR]", str(e))
+        return "error: " + str(e)
+
+
+def get_db_stats():
+    """آمار جداول دیتابیس"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in c.fetchall()]
+        stats = {}
+        for t in tables:
+            try:
+                c.execute(f"SELECT COUNT(*) FROM {t}")
+                stats[t] = c.fetchone()[0]
+            except Exception:
+                stats[t] = -1
+        conn.close()
+        return stats
+    except Exception as e:
+        print("[DB STATS ERR]", str(e))
+        return {}
+
+
+def cleanup_old_records(days_stats=30, days_events=999999):
+    """پاک کردن رکوردهای قدیمی - فقط msg_stats_daily (بقیه محفوظ)"""
+    results = {}
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        cutoff_stats = (datetime.now() - timedelta(days=days_stats)).strftime("%Y-%m-%d")
+
+        # فقط msg_stats_daily پاک می‌شه
+        try:
+            c.execute("DELETE FROM msg_stats_daily WHERE date < ?", (cutoff_stats,))
+            results["msg_stats_daily"] = c.rowcount
+        except Exception:
+            results["msg_stats_daily"] = 0
+
+        # members, group_events, spam_tracker, global_blacklist, user_contacts هرگز پاک نمی‌شن
+        results["group_events"] = 0
+        results["members"] = 0
+        results["spam_tracker"] = 0
+        results["global_blacklist"] = 0
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("[CLEANUP ERR]", str(e))
+    return results
+
+
+def truncate_log_file(keep_lines=5000):
+    """برش فایل لاگ - فقط آخرین N خط بمونه"""
+    try:
+        log_path = os.path.expanduser("~/groupbot_bot.log")
+        if not os.path.exists(log_path):
+            return 0, 0
+        size_before = os.path.getsize(log_path)
+        with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+        if len(lines) <= keep_lines:
+            return size_before, size_before
+        with open(log_path, 'w', encoding='utf-8') as f:
+            f.writelines(lines[-keep_lines:])
+        size_after = os.path.getsize(log_path)
+        return size_before, size_after
+    except Exception as e:
+        print("[LOG TRUNC ERR]", str(e))
+        return 0, 0
+
+
+def cleanup_temp_files():
+    """پاک کردن فایل‌های temp"""
+    count = 0
+    total_size = 0
+    try:
+        dirs = [
+            os.path.expanduser("~/groupbot/tmp"),
+            os.path.expanduser("~/groupbot/downloads"),
+        ]
+        for d in dirs:
+            if not os.path.exists(d):
+                continue
+            for f in os.listdir(d):
+                fp = os.path.join(d, f)
+                try:
+                    if os.path.isfile(fp):
+                        total_size += os.path.getsize(fp)
+                        os.remove(fp)
+                        count += 1
+                except Exception:
+                    pass
+    except Exception as e:
+        print("[TEMP CLEAN ERR]", str(e))
+    return count, total_size
+
+
+def cleanup_old_backups(keep_days=7):
+    """پاک کردن بکاپ‌های قدیمی"""
+    import glob
+    deleted = 0
+    freed = 0
+    try:
+        backup_dir = os.path.expanduser('~/storage/shared/ربات مدیریت گروه/backups')
+        if not os.path.exists(backup_dir):
+            return 0, 0
+        cutoff = datetime.now() - timedelta(days=keep_days)
+        for f in glob.glob(os.path.join(backup_dir, 'groupbot_backup_*.tar.gz')):
+            try:
+                mtime = datetime.fromtimestamp(os.path.getmtime(f))
+                if mtime < cutoff:
+                    freed += os.path.getsize(f)
+                    os.remove(f)
+                    deleted += 1
+            except Exception:
+                pass
+    except Exception as e:
+        print("[BACKUP CLEAN ERR]", str(e))
+    return deleted, freed
+
+
+# ============ Voice Call History (برای دعوت کال) ============
+def init_voice_call_history_table():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS voice_call_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        user_id INTEGER,
+        first_name TEXT,
+        username TEXT,
+        total_seconds INTEGER DEFAULT 0,
+        session_count INTEGER DEFAULT 0,
+        saved_at TEXT
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_vch_chat ON voice_call_history(chat_id)")
+    conn.commit()
+    conn.close()
+
+
+def save_voice_call_participants(chat_id, users_list):
+    """ذخیره لیست شرکت‌کننده‌های کال (از JSON ربات موزیک)"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        # پاک کردن لیست قبلی این گروه
+        c.execute("DELETE FROM voice_call_history WHERE chat_id=?", (chat_id,))
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for u in users_list:
+            c.execute("""INSERT INTO voice_call_history
+                         (chat_id, user_id, first_name, username, total_seconds, session_count, saved_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                      (chat_id,
+                       u.get("user_id", 0),
+                       u.get("first_name", ""),
+                       u.get("username", ""),
+                       u.get("total_seconds", 0),
+                       u.get("session_count", 0),
+                       now))
+        conn.commit()
+        cnt = len(users_list)
+        conn.close()
+        return cnt
+    except Exception as e:
+        print("[VCH SAVE ERR]", str(e))
+        return 0
+
+
+def get_voice_call_participants(chat_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT user_id, first_name, username, total_seconds, session_count, saved_at
+                     FROM voice_call_history WHERE chat_id=?
+                     ORDER BY total_seconds DESC""", (chat_id,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[VCH GET ERR]", str(e))
+        return []
+
+
+def get_voice_call_save_time(chat_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT saved_at FROM voice_call_history
+                     WHERE chat_id=? ORDER BY id DESC LIMIT 1""", (chat_id,))
+        r = c.fetchone()
+        conn.close()
+        return r[0] if r else None
+    except Exception:
+        return None
+
+
+
+# ============ Per-Chat Settings ============
+def get_chat_cooldown(chat_id):
+    try:
+        v = get_setting(chat_id, "cooldown_seconds", "")
+        if v != "":
+            return int(v)
+    except Exception:
+        pass
+    try:
+        v = get_setting(0, "sys_cooldown_seconds", "30")
+        return int(v)
+    except Exception:
+        return 30
+
+
+def set_chat_cooldown(chat_id, seconds):
+    try:
+        set_setting(chat_id, "cooldown_seconds", str(int(seconds)))
+        return True
+    except Exception:
+        return False
+
+
+def get_chat_panel_delete(chat_id):
+    try:
+        v = get_setting(chat_id, "panel_delete_time", "")
+        if v != "":
+            return int(v)
+    except Exception:
+        pass
+    try:
+        v = get_setting(0, "sys_panel_delete_time", "30")
+        return int(v)
+    except Exception:
+        return 30
+
+
+def set_chat_panel_delete(chat_id, seconds):
+    try:
+        set_setting(chat_id, "panel_delete_time", str(int(seconds)))
+        return True
+    except Exception:
+        return False
+
+
+
+
+# ============ Panel Timeout Settings ============
+def get_chat_panel_timeout(chat_id):
+    """زمان انقضای پنل (per-chat اگه نبود سراسری)"""
+    try:
+        v = get_setting(chat_id, "panel_timeout_seconds", "")
+        if v != "":
+            return int(v)
+    except Exception:
+        pass
+    try:
+        v = get_setting(0, "sys_panel_timeout_seconds", "300")
+        return int(v)
+    except Exception:
+        return 300
+
+
+def set_chat_panel_timeout(chat_id, seconds):
+    try:
+        set_setting(chat_id, "panel_timeout_seconds", str(int(seconds)))
+        return True
+    except Exception:
+        return False
+
+
+def get_chat_expire_delete(chat_id):
+    """زمان حذف پیام expire (per-chat اگه نبود سراسری)"""
+    try:
+        v = get_setting(chat_id, "expire_delete_seconds", "")
+        if v != "":
+            return int(v)
+    except Exception:
+        pass
+    try:
+        v = get_setting(0, "sys_expire_delete_seconds", "20")
+        return int(v)
+    except Exception:
+        return 20
+
+
+def set_chat_expire_delete(chat_id, seconds):
+    try:
+        set_setting(chat_id, "expire_delete_seconds", str(int(seconds)))
+        return True
+    except Exception:
+        return False
+
+
+
+# ============ AI Settings ============
+def get_ai_setting(chat_id, name, default=""):
+    """گرفتن تنظیم AI (per-chat اگه نبود سراسری)"""
+    try:
+        v = get_setting(chat_id, "ai_" + name, "")
+        if v != "":
+            return v
+    except Exception:
+        pass
+    try:
+        return get_setting(0, "ai_" + name, default)
+    except Exception:
+        return default
+
+
+def set_ai_setting(chat_id, name, value):
+    """ذخیره تنظیم AI برای یه چت خاص"""
+    try:
+        set_setting(chat_id, "ai_" + name, str(value))
+        return True
+    except Exception:
+        return False
+
+
+def get_ai_usage_today(chat_id=None):
+    """تعداد درخواست‌های AI امروز"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        today = datetime.now().strftime("%Y-%m-%d")
+        if chat_id is None:
+            c.execute("SELECT COUNT(*) FROM ai_usage WHERE used_at LIKE ?", (today + "%",))
+        else:
+            c.execute("SELECT COUNT(*) FROM ai_usage WHERE chat_id=? AND used_at LIKE ?",
+                      (chat_id, today + "%"))
+        r = c.fetchone()
+        conn.close()
+        return r[0] if r else 0
+    except Exception:
+        return 0
+
+
+def log_ai_usage(chat_id, user_id):
+    """ثبت استفاده از AI"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("INSERT INTO ai_usage (chat_id, user_id, used_at) VALUES (?, ?, ?)",
+                  (chat_id, user_id, now))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("[AI LOG ERR]", str(e))
+
+
+
+# ============ AI Message Auto-Delete ============
+def get_chat_ai_delete(chat_id):
+    """زمان حذف جواب‌های AI (per-chat اگه نبود سراسری)"""
+    try:
+        v = get_setting(chat_id, "ai_delete_seconds", "")
+        if v != "":
+            return int(v)
+    except Exception:
+        pass
+    try:
+        v = get_setting(0, "sys_ai_delete_seconds", "0")
+        return int(v)
+    except Exception:
+        return 0
+
+
+def set_chat_ai_delete(chat_id, seconds):
+    try:
+        set_setting(chat_id, "ai_delete_seconds", str(int(seconds)))
+        return True
+    except Exception:
+        return False
+
+
+
+# ============ Anti-Raid Tables ============
+def init_raid_tables():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS raid_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        action TEXT,
+        users_count INTEGER,
+        triggered_at TEXT,
+        ended_at TEXT,
+        status TEXT DEFAULT 'active'
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_raid_chat ON raid_events(chat_id)")
+    conn.commit()
+    conn.close()
+
+
+def log_raid_event(chat_id, action, users_count):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""INSERT INTO raid_events (chat_id, action, users_count, triggered_at, status)
+                     VALUES (?, ?, ?, ?, 'active')""",
+                  (chat_id, action, users_count, now))
+        conn.commit()
+        row_id = c.lastrowid
+        conn.close()
+        return row_id
+    except Exception as e:
+        print("[RAID LOG ERR]", str(e))
+        return None
+
+
+def end_raid_event(row_id):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("UPDATE raid_events SET status='ended', ended_at=? WHERE id=?", (now, row_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def get_raid_history(chat_id, limit=10):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT id, action, users_count, triggered_at, ended_at, status
+                     FROM raid_events WHERE chat_id=?
+                     ORDER BY id DESC LIMIT ?""", (chat_id, limit))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def get_chat_raid_setting(chat_id, name, default=""):
+    """گرفتن تنظیم anti-raid برای گروه"""
+    try:
+        v = get_setting(chat_id, "raid_" + name, "")
+        if v != "":
+            return v
+    except Exception:
+        pass
+    try:
+        return get_setting(0, "raid_" + name, default)
+    except Exception:
+        return default
+
+
+def set_chat_raid_setting(chat_id, name, value):
+    try:
+        set_setting(chat_id, "raid_" + name, str(value))
+        return True
+    except Exception:
+        return False
+
+
+# ===== PANEL WARNING & SUDO TIMER ACCESS (Auto-Added) =====
+def get_chat_panel_warning(chat_id):
+    """بررسی فعال بودن هشدار بسته شدن پنل"""
+    try:
+        v = get_setting(chat_id, "panel_warning_enabled", None)
+        if v is None:
+            return int(get_setting(0, "panel_warning_enabled", "0") or 0)
+        return int(v)
+    except Exception:
+        return 0
+
+
+def set_chat_panel_warning(chat_id, enabled):
+    """تنظیم هشدار برای یک گروه"""
+    try:
+        set_setting(chat_id, "panel_warning_enabled", str(int(enabled)))
+        return True
+    except Exception:
+        return False
+
+
+def get_sudo_timer_access():
+    """بررسی دسترسی سودو به تنظیمات تایمر"""
+    try:
+        return int(get_setting(0, "sudo_timer_access", "0") or 0)
+    except Exception:
+        return 0
+
+
+def set_sudo_timer_access(enabled):
+    """تنظیم دسترسی سودو (فقط سازنده)"""
+    try:
+        set_setting(0, "sudo_timer_access", str(int(enabled)))
+        return True
+    except Exception:
+        return False
+
+
+# ========== REPORTS SYSTEM ==========
+REP_LIMIT_OPTS = [1, 2, 3, 5, 10, 20, 50, 100]
+REP_CD_OPTS = [30, 60, 300, 900, 3600, 21600, 86400]
+
+
+def add_report(gid, gtitle, rep_id, rep_name, rep_user, ru_id, ru_name, ru_user, rmsg_id, rmsg_text):
+    try:
+        import datetime as _dt
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""INSERT INTO reports 
+            (group_id, group_title, reporter_id, reporter_name, reporter_username,
+             reported_user_id, reported_user_name, reported_user_username,
+             reported_message_id, reported_message_text, created_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+            (gid, gtitle, rep_id, rep_name, rep_user, ru_id, ru_name, ru_user, rmsg_id, rmsg_text,
+             _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        rid = c.lastrowid
+        conn.commit()
+        conn.close()
+        return rid
+    except Exception as e:
+        print("[ADD REPORT ERR] " + str(e))
+        return None
+
+
+def get_pending_reports(gid, limit=100):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""SELECT id, group_id, group_title, reporter_id, reporter_name, reporter_username,
+                            reported_user_id, reported_user_name, reported_user_username,
+                            reported_message_id, reported_message_text, created_at
+                     FROM reports WHERE group_id=? AND status='pending'
+                     ORDER BY id ASC LIMIT ?""", (gid, limit))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[GET PENDING ERR] " + str(e))
+        return []
+
+
+def count_pending_reports(gid):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM reports WHERE group_id=? AND status='pending'", (gid,))
+        n = c.fetchone()[0]
+        conn.close()
+        return n
+    except Exception:
+        return 0
+
+
+def update_report_status(rid, status):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE reports SET status=? WHERE id=?", (status, rid))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[UPDATE REPORT ERR] " + str(e))
+        return False
+
+
+def count_user_reports_today(rep_id, gid):
+    try:
+        import datetime as _dt
+        today = _dt.datetime.now().strftime("%Y-%m-%d")
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM reports WHERE reporter_id=? AND group_id=? AND created_at LIKE ?",
+                  (rep_id, gid, today + '%'))
+        n = c.fetchone()[0]
+        conn.close()
+        return n
+    except Exception:
+        return 0
+
+
+def get_report_settings(cid):
+    try:
+        dl = int(get_setting(cid, "report_daily_limit", "3") or 3)
+    except Exception:
+        dl = 3
+    try:
+        cd = int(get_setting(cid, "report_cooldown", "300") or 300)
+    except Exception:
+        cd = 300
+    return dl, cd
+
+
+def set_report_daily_limit(cid, value):
+    try:
+        set_setting(cid, "report_daily_limit", str(int(value)))
+        return True
+    except Exception:
+        return False
+
+
+def set_report_cooldown(cid, value):
+    try:
+        set_setting(cid, "report_cooldown", str(int(value)))
+        return True
+    except Exception:
+        return False
+
+
+def fmt_rep_cd(seconds):
+    try:
+        s = int(seconds)
+    except Exception:
+        return str(seconds)
+    if s < 60:
+        return f"{s} ثانیه"
+    if s < 3600:
+        return f"{s // 60} دقیقه"
+    if s < 86400:
+        return f"{s // 3600} ساعت"
+    return f"{s // 86400} روز"
+
+
+# [MULTI-FJ-START]
+def get_all_global_force_joins():
+    """همه لینک‌های FJ سراسری"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT id, target_id, target_link, target_name FROM force_join WHERE chat_id=0 ORDER BY id")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        conn.close()
+        print("[GET ALL FJ ERR] " + str(e))
+        return []
+
+def add_global_force_join(target_id, target_link, target_name):
+    """افزودن لینک FJ جدید (بدون حذف قبلی‌ها)"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO force_join (chat_id, force_type, target_id, target_link, target_name) VALUES (0, 'global', ?, ?, ?)",
+                  (target_id, target_link, target_name))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[ADD FJ ERR] " + str(e))
+        conn.close()
+        return False
+
+def remove_global_force_join_by_id(fid):
+    """حذف یه FJ با ID"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM force_join WHERE id=? AND chat_id=0", (fid,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[DEL FJ ID ERR] " + str(e))
+        conn.close()
+        return False
+# [MULTI-FJ-END]
+
+# [LOG-SYSTEM-START]
+def init_log_tables():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS log_channels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        owner_chat_id INTEGER DEFAULT 0,
+        channel_id INTEGER NOT NULL,
+        channel_title TEXT,
+        enabled INTEGER DEFAULT 1,
+        created_at TEXT,
+        created_by INTEGER,
+        UNIQUE(scope, owner_chat_id)
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS log_archive (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT, chat_id INTEGER, action TEXT,
+        actor_id INTEGER, actor_name TEXT,
+        target_id INTEGER, target_name TEXT,
+        details TEXT, channel_msg_id INTEGER, created_at TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS system_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ping_ms INTEGER, ram_mb REAL, cpu_percent REAL,
+        disk_mb REAL, db_size_kb REAL, api_calls INTEGER,
+        err_count INTEGER, restarts INTEGER, collected_at TEXT
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_log_archive_chat ON log_archive(chat_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_log_archive_action ON log_archive(action)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_log_archive_created ON log_archive(created_at)")
+    conn.commit()
+    conn.close()
+
+
+def set_log_channel(scope, owner_chat_id, channel_id, channel_title, user_id):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        c.execute("DELETE FROM log_channels WHERE scope=? AND owner_chat_id=?", (scope, owner_chat_id))
+        c.execute("""INSERT INTO log_channels (scope, owner_chat_id, channel_id, channel_title, enabled, created_at, created_by)
+                     VALUES (?, ?, ?, ?, 1, ?, ?)""",
+                  (scope, owner_chat_id, channel_id, channel_title, now, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[SET LOG CH ERR] " + str(e))
+        conn.close()
+        return False
+
+
+def get_log_channel(scope, owner_chat_id=0):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT id, channel_id, channel_title, enabled FROM log_channels WHERE scope=? AND owner_chat_id=?", (scope, owner_chat_id))
+        r = c.fetchone()
+        conn.close()
+        return r
+    except Exception:
+        conn.close()
+        return None
+
+
+def remove_log_channel(scope, owner_chat_id=0):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM log_channels WHERE scope=? AND owner_chat_id=?", (scope, owner_chat_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        conn.close()
+        return False
+
+
+def toggle_log_channel(scope, owner_chat_id, enabled):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE log_channels SET enabled=? WHERE scope=? AND owner_chat_id=?", (1 if enabled else 0, scope, owner_chat_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        conn.close()
+        return False
+
+
+def get_all_log_channels(scope=None):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        if scope:
+            c.execute("SELECT id, scope, owner_chat_id, channel_id, channel_title, enabled FROM log_channels WHERE scope=?", (scope,))
+        else:
+            c.execute("SELECT id, scope, owner_chat_id, channel_id, channel_title, enabled FROM log_channels")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        conn.close()
+        return []
+
+
+def archive_log_event(scope, chat_id, action, actor_id, actor_name, target_id, target_name, details, channel_msg_id=0):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        c.execute("""INSERT INTO log_archive (scope, chat_id, action, actor_id, actor_name, target_id, target_name, details, channel_msg_id, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (scope, chat_id, action, actor_id, actor_name, target_id, target_name, details, channel_msg_id, now))
+        conn.commit()
+        new_id = c.lastrowid
+        conn.close()
+        return new_id
+    except Exception as e:
+        print("[ARCHIVE LOG ERR] " + str(e))
+        conn.close()
+        return None
+
+
+def get_log_events(action=None, chat_id=None, actor_id=None, target_id=None, limit=50, offset=0):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        sql = "SELECT id, scope, chat_id, action, actor_id, actor_name, target_id, target_name, details, created_at FROM log_archive WHERE 1=1"
+        params = []
+        if action:
+            sql += " AND action=?"; params.append(action)
+        if chat_id is not None:
+            sql += " AND chat_id=?"; params.append(chat_id)
+        if actor_id is not None:
+            sql += " AND actor_id=?"; params.append(actor_id)
+        if target_id is not None:
+            sql += " AND target_id=?"; params.append(target_id)
+        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        c.execute(sql, params)
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("[GET LOG EVENTS ERR] " + str(e))
+        conn.close()
+        return []
+
+
+def count_log_events(action=None, chat_id=None, days=None):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        sql = "SELECT COUNT(*) FROM log_archive WHERE 1=1"
+        params = []
+        if action:
+            sql += " AND action=?"; params.append(action)
+        if chat_id is not None:
+            sql += " AND chat_id=?"; params.append(chat_id)
+        if days:
+            since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+            sql += " AND created_at >= ?"; params.append(since)
+        c.execute(sql, params)
+        r = c.fetchone()
+        conn.close()
+        return r[0] if r else 0
+    except Exception:
+        conn.close()
+        return 0
+
+
+def log_stats_by_chat(days=30):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("SELECT chat_id, COUNT(*) FROM log_archive WHERE created_at >= ? GROUP BY chat_id ORDER BY COUNT(*) DESC LIMIT 50", (since,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        conn.close()
+        return []
+
+
+def save_system_stats(ping_ms, ram_mb, cpu_pct, disk_mb, db_kb, api_calls, err_count, restarts):
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        c.execute("""INSERT INTO system_stats (ping_ms, ram_mb, cpu_percent, disk_mb, db_size_kb, api_calls, err_count, restarts, collected_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (ping_ms, ram_mb, cpu_pct, disk_mb, db_kb, api_calls, err_count, restarts, now))
+        cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("DELETE FROM system_stats WHERE collected_at < ?", (cutoff,))
+        cutoff2 = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("DELETE FROM log_archive WHERE created_at < ?", (cutoff2,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print("[SAVE SYS STATS ERR] " + str(e))
+        conn.close()
+        return False
+
+
+def get_latest_system_stats():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT ping_ms, ram_mb, cpu_percent, disk_mb, db_size_kb, api_calls, err_count, restarts, collected_at FROM system_stats ORDER BY id DESC LIMIT 1")
+        r = c.fetchone()
+        conn.close()
+        return r
+    except Exception:
+        conn.close()
+        return None
+# [LOG-SYSTEM-END]
+
+
+
+# ═══════════════════════════════════════════════════
+# Group Admins — اضافه شده در fix v5
+# ═══════════════════════════════════════════════════
+
+def add_admin_to_db(chat_id, user_id, name):
+    """اضافه کردن ادمین به جدول group_admins"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS group_admins (
+                chat_id INTEGER,
+                user_id INTEGER,
+                name TEXT,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        """)
+        c.execute(
+            "INSERT OR REPLACE INTO group_admins (chat_id, user_id, name) VALUES (?, ?, ?)",
+            (chat_id, user_id, name)
+        )
+        conn.commit()
+        conn.close()
+        print(f"[DB] add_admin_to_db: chat={chat_id}, user={user_id}, name={name}")
+        return True
+    except Exception as e:
+        print(f"[DB ERR] add_admin_to_db: {e}")
+        return False
+
+
+def is_admin(chat_id, user_id):
+    """چک می‌کنه که کاربر ادمین گروهه"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM group_admins WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+        row = c.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        print(f"[IS ADMIN ERR] {e}")
+        return False
+
+
+def get_all_admins(chat_id):
+    """گرفتن همه ادمین‌های گروه"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, name FROM group_admins WHERE chat_id=?", (chat_id,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"[GET ALL ADMINS ERR] {e}")
+        return []
+
+
+def remove_admin_from_db(chat_id, user_id):
+    """حذف ادمین از جدول group_admins"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM group_admins WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[DB ERR] remove_admin_from_db: {e}")
+        return False
+
+
+def remove_admin_from_db(chat_id, user_id):
+    """حذف ادمین از جدول"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("DELETE FROM group_admins WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[DB ERR] remove_admin_from_db: {e}")
+        return False
+
+
+def get_group_admins_db(chat_id):
+    """گرفتن لیست ادمین‌های گروه"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, name FROM group_admins WHERE chat_id=?", (chat_id,))
+        rows = c.fetchall()
+        conn.close()
+        return [{"user_id": r[0], "name": r[1]} for r in rows]
+    except Exception as e:
+        print(f"[DB ERR] get_group_admins_db: {e}")
+        return []
+
+
+def get_group_admins(chat_id):
+    """گرفتن همه ادمین‌های گروه از جدول group_admins"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, name FROM group_admins WHERE chat_id=?", (chat_id,))
+        rows = c.fetchall()
+        conn.close()
+        return [{"user_id": r[0], "name": r[1]} for r in rows]
+    except Exception as e:
+        print(f"[DB ERR] get_group_admins: {e}")
+        return []
+
+
+def get_admin_list(chat_id):
+    """گرفتن لیست ادمین‌ها (alias)"""
+    return get_group_admins(chat_id)
+
+
+def admin_list_menu(uid, chat_id, admins):
+    """Alias — استفاده از همون تابع admin_perms"""
+    try:
+        from modules.admin_perms import admin_list_menu as _alm
+        return _alm(uid, chat_id, admins)
+    except Exception as e:
+        print(f"[ADMIN LIST ALIAS ERR] {e}")
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ خطا در ساخت منو", callback_data="menu_close:" + str(uid))]
+        ])
+
+
+
+def queue_purge(chat_id, msg_id, count, requested_by):
+    """ثبت درخواست پاکسازی برای userbot"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO purge_requests (chat_id, msg_id, count, requested_by)
+            VALUES (?, ?, ?, ?)
+        """, (chat_id, msg_id, count, requested_by))
+        req_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        print(f"[QUEUE PURGE] id={req_id}, chat={chat_id}, count={count}")
+        return req_id
+    except Exception as e:
+        print(f"[QUEUE PURGE ERR] {e}")
+        return None
+
+
+def get_purge_result(req_id):
+    """گرفتن نتیجه پاکسازی"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT status, result FROM purge_requests WHERE id=?", (req_id,))
+        row = c.fetchone()
+        conn.close()
+        return row
+    except Exception as e:
+        print(f"[GET PURGE ERR] {e}")
+        return None
+
+
+
+def queue_userbot_join(chat_id, invite_link):
+    """ثبت درخواست join userbot"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        # چک کن قبلاً نبوده
+        c.execute("SELECT id FROM userbot_join_queue WHERE chat_id=? AND status='pending'", (chat_id,))
+        if c.fetchone():
+            conn.close()
+            return None
+        c.execute("INSERT INTO userbot_join_queue (chat_id, invite_link) VALUES (?, ?)",
+                  (chat_id, invite_link))
+        req_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        print(f"[QUEUE JOIN] id={req_id}, chat={chat_id}")
+        return req_id
+    except Exception as e:
+        print(f"[QUEUE JOIN ERR] {e}")
+        return None
+
+
+def get_pending_joins():
+    """درخواست‌های join pending"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("SELECT id, chat_id, invite_link FROM userbot_join_queue WHERE status='pending' ORDER BY id ASC LIMIT 10")
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"[GET JOINS ERR] {e}")
+        return []
+
+
+def mark_join_done(req_id, result):
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE userbot_join_queue SET status='done', result=?, processed_at=CURRENT_TIMESTAMP WHERE id=?", (result, req_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[MARK JOIN ERR] {e}")
+
+# ═══════════════════════════════════════════════
+# Global Settings
+# ═══════════════════════════════════════════════
+def get_global(key, default=None):
+    """خوندن یه تنظیم سراسری"""
+    import sqlite3
+    from config import DATABASE_PATH
+    try:
+        c = sqlite3.connect(DATABASE_PATH)
+        r = c.execute("SELECT value FROM global_settings WHERE key=?", (key,)).fetchone()
+        c.close()
+        return r[0] if r else default
+    except Exception:
+        return default
+
+
+def set_global(key, value):
+    """ذخیره یه تنظیم سراسری"""
+    import sqlite3
+    import datetime
+    from config import DATABASE_PATH
+    try:
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c = sqlite3.connect(DATABASE_PATH)
+        c.execute("INSERT OR REPLACE INTO global_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                  (key, str(value), now))
+        c.commit()
+        c.close()
+        return True
+    except Exception as e:
+        print("[set_global] " + str(e))
+        return False
+
+
+def get_global_int(key, default=0):
+    try:
+        return int(get_global(key, default) or default)
+    except:
+        return default
+
+
+def get_global_float(key, default=0.0):
+    try:
+        return float(get_global(key, default) or default)
+    except:
+        return default
+
+
+def get_all_globals():
+    """همه تنظیمات سراسری"""
+    import sqlite3
+    from config import DATABASE_PATH
+    try:
+        c = sqlite3.connect(DATABASE_PATH)
+        rows = c.execute("SELECT key, value FROM global_settings").fetchall()
+        c.close()
+        return dict(rows)
+    except Exception:
+        return {}

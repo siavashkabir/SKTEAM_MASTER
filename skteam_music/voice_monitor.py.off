@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""
+Voice Monitor — آمار ویس‌کال برای Player
+- به userbot وصل می‌شه
+- هر ۱۰ ثانیه کال‌های فعال رو cache می‌کنه
+- RawUpdateHandler برای ورود/خروج اعضا
+- هر ۶۰ ثانیه VCSTAT به Manager می‌فرسته
+"""
+import asyncio, os, json, time, logging
+from datetime import datetime, timedelta
+from pathlib import Path
+
+_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(_loop)
+
+from pyrogram import Client
+from pyrogram.raw.functions.channels import GetFullChannel
+from pyrogram.raw.types import (
+    InputChannel, UpdateGroupCall, UpdateGroupCallParticipants,
+)
+from pyrogram.handlers import RawUpdateHandler
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("voicemon")
+
+API_ID = int(os.environ.get("TG_API_ID", "28151643"))
+API_HASH = os.environ.get("TG_API_HASH", "")
+SESSION = os.environ.get("TG_SESSION_STRING", "")
+MUSIC_BOT_API_KEY = os.environ.get("MUSIC_BOT_API_KEY", "")
+MANAGER_BOT_ID = 8401175719  # @SkTeamMusic_Bot
+
+WORKDIR = "/root/melody-player"
+STATE_FILE = "/root/melody-player/voice_state.json"
+
+# ═══ State ═══
+# call_to_chat = { call_id: chat_id }
+# sessions = { chat_id: { session_start, participants: { user_id: {joined_at, left_at, first_name, username, sessions} } } }
+call_to_chat = {}
+sessions = {}
+
+
+def load_state():
+    global sessions
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                sessions = json.load(f)
+            log.info(f"loaded state: {len(sessions)} chats")
+    except Exception as e:
+        log.warning(f"load_state: {e}")
+        sessions = {}
+
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(sessions, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning(f"save_state: {e}")
+
+
+def get_user_name(users, user_id):
+    """از دیکشنری users نام بگیر"""
+    u = users.get(user_id)
+    if not u:
+        return "", ""
+    fn = getattr(u, "first_name", "") or ""
+    un = getattr(u, "username", "") or ""
+    return fn, un
+
+
+async def poll_active_calls(client):
+    """هر ۱۰ ثانیه — کال‌های فعال رو cache کن"""
+    try:
+        # چت‌های توی DB Manager
+        import sqlite3
+        db = Path.home() / "groupbot" / "data" / "groupbot.db"
+        # ★ Player روی Ubuntu هست، پس فایل DB گروه‌بات از Termux mount شده
+        # مسیر واقعی: /data/data/com.termux/files/home/groupbot/data/groupbot.db
+        db_alt = Path("/data/data/com.termux/files/home/groupbot/data/groupbot.db")
+        if db_alt.exists():
+            db = db_alt
+        elif not db.exists():
+            return
+
+        conn = sqlite3.connect(str(db), timeout=5)
+        rows = conn.execute("SELECT chat_id FROM groups").fetchall()
+        conn.close()
+        chats = [r[0] for r in rows]
+
+        for chat_id in chats:
+            try:
+                peer = await client.resolve_peer(chat_id)
+                input_channel = InputChannel(
+                    channel_id=peer.channel_id,
+                    access_hash=peer.access_hash,
+                )
+                full = await client.invoke(GetFullChannel(channel=input_channel))
+                call = full.full_chat.call
+                if call:
+                    call_to_chat[call.id] = chat_id
+                    # اگه این chat_id توی sessions نیست، بساز
+                    if str(chat_id) not in sessions:
+                        sessions[str(chat_id)] = {
+                            "session_start": int(time.time()),
+                            "title": getattr(full.chats[0], "title", "") if getattr(full, "chats", None) else "",
+                            "participants": {},
+                        }
+            except Exception as e:
+                log.debug(f"poll {chat_id}: {e}")
+            await asyncio.sleep(0.5)
+    except Exception as e:
+        log.warning(f"poll_active_calls: {e}")
+
+
+async def on_raw_update(client, update, users, chats):
+    """event ورود/خروج"""
+    try:
+        if isinstance(update, UpdateGroupCallParticipants):
+            call_id = update.call.id
+            chat_id = call_to_chat.get(call_id)
+            if not chat_id:
+                # cache نمی‌شناسه، صبر کن تا poll بعدی
+                return
+
+            chat_key = str(chat_id)
+            if chat_key not in sessions:
+                sessions[chat_key] = {
+                    "session_start": int(time.time()),
+                    "title": "",
+                    "participants": {},
+                }
+
+            sess = sessions[chat_key]
+            for p in update.participants:
+                peer = p.peer
+                if not hasattr(peer, "user_id"):
+                    continue
+                uid = peer.user_id
+                uid_str = str(uid)
+
+                fn, un = get_user_name(users, uid)
+
+                if p.left:
+                    # کاربر خارج شد
+                    if uid_str in sess["participants"]:
+                        rec = sess["participants"][uid_str]
+                        if rec.get("left_at"):
+                            continue  # قبلاً ثبت شده
+                        rec["left_at"] = int(time.time())
+                        rec["total_seconds"] = rec["left_at"] - rec["joined_at"]
+                        log.info(f"[LEFT] {uid} ({fn}) from {chat_id} — {rec['total_seconds']}s")
+                else:
+                    # کاربر وارد شد
+                    if uid_str not in sess["participants"]:
+                        sess["participants"][uid_str] = {
+                            "joined_at": int(p.date or time.time()),
+                            "left_at": None,
+                            "first_name": fn,
+                            "username": un,
+                            "total_seconds": 0,
+                            "session_count": 1,
+                        }
+                        log.info(f"[JOIN] {uid} ({fn}) to {chat_id}")
+                    else:
+                        # قبلاً بود — دوباره join شده
+                        rec = sess["participants"][uid_str]
+                        if rec.get("left_at"):
+                            # rejoin
+                            rec["joined_at"] = int(time.time())
+                            rec["left_at"] = None
+                            rec["session_count"] = rec.get("session_count", 0) + 1
+                            log.info(f"[REJOIN] {uid} ({fn}) to {chat_id}")
+
+            save_state()
+
+        elif isinstance(update, UpdateGroupCall):
+            # کال شروع/پایان
+            call = update.call
+            if call is None:
+                # کال تموم شد
+                log.info("[CALL END]")
+                # برای همه chat_ids که call_to_chat نگاشت داده بودن، session تموم کن
+                # ★ اینجا call_to_chat پاک نمی‌شه — منتظر poll بعدی می‌مونیم
+    except Exception as e:
+        log.warning(f"on_raw_update: {e}")
+
+
+async def send_vcstat(client):
+    """هر ۶۰ ثانیه — آمار به Manager بفرست"""
+    try:
+        for chat_key, sess in list(sessions.items()):
+            chat_id = int(chat_key)
+            participants = sess.get("participants", {})
+            if not participants:
+                continue
+
+            # فقط اونایی که توی ۶ ساعت اخیر activity داشتن
+            now = int(time.time())
+            recent = {}
+            for uid_str, rec in participants.items():
+                last = rec.get("left_at") or rec.get("joined_at") or 0
+                if now - last < 6 * 3600:
+                    recent[uid_str] = rec
+
+            if not recent:
+                continue
+
+            users_list = []
+            total = 0
+            for uid_str, rec in recent.items():
+                # اگه هنوز توی کال هست، الان رو حساب کن
+                if rec.get("left_at"):
+                    dur = rec.get("total_seconds") or (rec["left_at"] - rec["joined_at"])
+                else:
+                    dur = now - rec["joined_at"]
+                users_list.append({
+                    "user_id": int(uid_str),
+                    "first_name": rec.get("first_name", ""),
+                    "username": rec.get("username", ""),
+                    "total_seconds": int(dur),
+                    "session_count": int(rec.get("session_count", 1)),
+                })
+                total += int(dur)
+
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            payload = json.dumps({
+                "total_seconds": total,
+                "users": users_list,
+            }, ensure_ascii=False)
+
+            msg = f"VCSTAT:{MUSIC_BOT_API_KEY}:{chat_id}:{date_str}:{payload}"
+            try:
+                await client.send_message(MANAGER_BOT_ID, msg)
+                log.info(f"[VCSTAT] sent to manager: chat={chat_id}, users={len(users_list)}, total={total}s")
+            except Exception as e:
+                log.warning(f"send vcstat: {e}")
+    except Exception as e:
+        log.warning(f"send_vcstat: {e}")
+
+
+async def main():
+    log.info("=" * 50)
+    log.info("Voice Monitor started")
+    log.info("=" * 50)
+
+    load_state()
+
+    app = Client(
+        "userbot_service",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=SESSION,
+        workdir=WORKDIR,
+    )
+
+    app.add_handler(RawUpdateHandler(on_raw_update))
+    await app.start()
+    me = await app.get_me()
+    log.info(f"✅ userbot: {me.first_name} (@{me.username}, id={me.id})")
+
+    # حلقه اصلی
+    last_poll = 0
+    last_send = 0
+    while True:
+        try:
+            now = time.time()
+            if now - last_poll >= 10:
+                await poll_active_calls(app)
+                last_poll = now
+            if now - last_send >= 60:
+                await send_vcstat(app)
+                last_send = now
+            await asyncio.sleep(1)
+        except Exception as e:
+            log.warning(f"main loop: {e}")
+            await asyncio.sleep(5)
+
+
+if __name__ == "__main__":
+    try:
+        _loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        log.info("stopped")
