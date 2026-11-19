@@ -54,7 +54,9 @@ try:
     _ld2(_os2.path.expanduser("~/.env"))
 except Exception:
     pass
-BOT_TOKEN = _os2.environ.get("MUSIC_BOT_TOKEN") or "8898616887:AAFxBFr_xXxwzZEV7STjqn22tHdB-0c4rIw"
+BOT_TOKEN = _os2.environ.get("MUSIC_BOT_TOKEN", "")
+if not BOT_TOKEN:
+    raise RuntimeError("MUSIC_BOT_TOKEN is not set (put it in ~/.env)")
 OWNER_ID_REC = 7955185125
 SK_SERVER = "http://127.0.0.1:8080"
 
@@ -79,7 +81,7 @@ _GB_DB = Path.home() / "groupbot" / "data" / "groupbot.db"
 
 def _sub_is_active(chat_id, sub_type):
     """چک اشتراک از groupbot.db (مسیر مطلق)"""
-    import sqlite3 as _s
+    import turso_db as _s
     from datetime import datetime as _dt
     if not _GB_DB.exists():
         log.warning(f"[sub] DB نیست: {_GB_DB}")
@@ -108,7 +110,7 @@ def _sub_is_active(chat_id, sub_type):
 
 def _sub_days(chat_id, sub_type):
     """روزهای مانده"""
-    import sqlite3 as _s
+    import turso_db as _s
     from datetime import datetime as _dt
     if not _GB_DB.exists():
         return 0
@@ -193,7 +195,7 @@ async def can_play(uid, cid):
     if db.is_owner(uid) or db.is_sudo(uid): return True
     # ★ سودوهای groupbot (bot_admins)
     try:
-        import sqlite3 as _s
+        import turso_db as _s
         _gb = Path.home() / "groupbot" / "data" / "groupbot.db"
         if _gb.exists():
             _c = _s.connect(str(_gb), timeout=3)
@@ -205,7 +207,7 @@ async def can_play(uid, cid):
         pass
     # ★ مالک پلیر
     try:
-        import sqlite3 as _s
+        import turso_db as _s
         _p = Path.home() / "skteam_music" / "data" / "settings.db"
         _c = _s.connect(str(_p), timeout=3)
         _r = _c.execute(
@@ -222,7 +224,7 @@ async def can_play(uid, cid):
 async def _record_play(cid, uid, query, title="", source=""):
     """ثبت پخش در دیتابیس"""
     try:
-        import sqlite3 as _s
+        import turso_db as _s
         from datetime import datetime as _dt
         gb = Path.home() / "groupbot" / "data" / "groupbot.db"
         if not gb.exists(): return
@@ -789,7 +791,7 @@ async def cmd_pv_panel(update, context):
     uid = u.id
     is_bot_owner = db.is_owner(uid)
 
-    import sqlite3 as _s
+    import turso_db as _s
     _db = Path.home() / "groupbot" / "data" / "groupbot.db"
     if not _db.exists():
         await update.effective_message.reply_text("❌ دیتابیس نیست")
@@ -828,7 +830,7 @@ async def cmd_pv_panel(update, context):
     if is_bot_owner:
         _h_count = 0
         try:
-            import sqlite3 as _sq
+            import turso_db as _sq
             _hc = _sq.connect(str(_db), timeout=5)
             _h_count = _hc.execute("SELECT COUNT(*) FROM helpers WHERE enabled=1").fetchone()[0]
             _hc.close()
@@ -941,7 +943,7 @@ async def cmd_start(update, context):
     is_bot_owner = db.is_owner(uid)
 
     # ─── چک اشتراک کاربر ───
-    import sqlite3 as _s
+    import turso_db as _s
     _db = Path.home() / "groupbot" / "data" / "groupbot.db"
     user_groups = []
     if _db.exists():
@@ -1198,7 +1200,7 @@ async def _cb_impl(update, context):
             await q.answer("⛔", show_alert=True); return
         _h_count2 = 0
         try:
-            import sqlite3 as _sq2
+            import turso_db as _sq2
             _hc2 = _sq2.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"), timeout=5)
             _h_count2 = _hc2.execute("SELECT COUNT(*) FROM helpers WHERE enabled=1").fetchone()[0]
             _hc2.close()
@@ -1348,7 +1350,7 @@ async def _cb_impl(update, context):
         if not db.is_owner(uid):
             await q.answer("⛔", show_alert=True); return
         cat = data.split(":", 1)[1]
-        import sqlite3 as _s
+        import turso_db as _s
         _c = _s.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"))
         # JOIN با groups برای گرفتن اسم
         rows = _c.execute("""
@@ -1392,7 +1394,7 @@ async def _cb_impl(update, context):
             await q.answer("⛔", show_alert=True); return
         parts = data.split(":", 2)
         cat, c2 = parts[1], parts[2]
-        import sqlite3 as _s
+        import turso_db as _s
         _c = _s.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"))
         r = _c.execute("SELECT enabled FROM subscriptions WHERE chat_id=? AND sub_type=?", (int(c2), cat)).fetchone()
         if r:
@@ -1555,7 +1557,7 @@ async def _cb_impl(update, context):
     if data == "gset:apply_all":
         if not db.is_owner(uid):
             await q.answer("⛔", show_alert=True); return
-        import sqlite3 as _s
+        import turso_db as _s
         try:
             _c = _s.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"))
             rows = _c.execute("SELECT chat_id FROM groups").fetchall()
@@ -1587,7 +1589,7 @@ async def _cb_impl(update, context):
     if data == "adm_playstats":
         if not db.is_owner(uid):
             await q.answer("⛔", show_alert=True); return
-        import sqlite3 as _s
+        import turso_db as _s
         from datetime import datetime as _dt
         import datetime as _dtmod
         gb = Path.home() / "groupbot" / "data" / "groupbot.db"
@@ -1724,7 +1726,7 @@ async def _cb_impl(update, context):
         is_owner_of_group = db.is_owner(uid)
         if not is_owner_of_group:
             try:
-                import sqlite3 as _s
+                import turso_db as _s
                 _db = Path.home() / "groupbot" / "data" / "groupbot.db"
                 _c = _s.connect(str(_db))
                 _r = _c.execute("SELECT 1 FROM group_owners WHERE chat_id=? AND user_id=?",
@@ -1741,7 +1743,7 @@ async def _cb_impl(update, context):
             return
         # toggle یا clip
         if action == "pvrec_toggle":
-            import sqlite3 as _s
+            import turso_db as _s
             _db2 = Path(__file__).parent / "data" / "settings.db"
             _c2 = _s.connect(str(_db2))
             _c2.execute("""CREATE TABLE IF NOT EXISTS record_settings (
@@ -1772,7 +1774,7 @@ async def _cb_impl(update, context):
             clips = [(60, "۱ دقیقه"), (180, "۳ دقیقه"), (300, "۵ دقیقه"),
                      (600, "۱۰ دقیقه"), (900, "۱۵ دقیقه"),
                      (1800, "۳۰ دقیقه"), (3600, "۱ ساعت")]
-            import sqlite3 as _s
+            import turso_db as _s
             _db2 = Path(__file__).parent / "data" / "settings.db"
             _c2 = _s.connect(str(_db2))
             _r = _c2.execute("SELECT clip_sec FROM record_settings WHERE chat_id=?",
@@ -1795,7 +1797,7 @@ async def _cb_impl(update, context):
             return
         if action == "pvrec_clipset":
             sec = int(parts[2])
-            import sqlite3 as _s
+            import turso_db as _s
             _db2 = Path(__file__).parent / "data" / "settings.db"
             _c2 = _s.connect(str(_db2))
             _r = _c2.execute("SELECT enabled FROM record_settings WHERE chat_id=?",
@@ -1933,7 +1935,7 @@ async def _cb_impl(update, context):
                 t, k = settings_menu.record_menu(cid)
                 await safe_edit(q, t, k); return
             if act == "rec_toggle":
-                import sqlite3
+                import turso_db as sqlite3
                 _db = Path(__file__).parent / "data" / "settings.db"
                 _c = sqlite3.connect(str(_db))
                 _c.execute("""CREATE TABLE IF NOT EXISTS record_settings (
@@ -1970,7 +1972,7 @@ async def _cb_impl(update, context):
                 await safe_edit(q, t, k); return
             if act.startswith("rec_clip_set:"):
                 sec = int(act.split(":", 1)[1])
-                import sqlite3
+                import turso_db as sqlite3
                 _db = Path(__file__).parent / "data" / "settings.db"
                 _c = sqlite3.connect(str(_db))
                 _c.execute("""CREATE TABLE IF NOT EXISTS record_settings (
@@ -2497,7 +2499,7 @@ def _get_owner_call_names(chat_id):
     """اسم‌های مالکین برای صدا زدن"""
     names = []
     try:
-        import sqlite3 as _s
+        import turso_db as _s
         from pathlib import Path as _P
         _db = _P.home() / "skteam_music" / "data" / "settings.db"
         conn = _s.connect(str(_db), timeout=5)
@@ -2526,7 +2528,7 @@ async def msg_handler(update, context):
             is_bot_owner = db.is_owner(uid)
             if not is_bot_owner:
                 # چک مالک گروه
-                import sqlite3 as _s
+                import turso_db as _s
                 _db = Path.home() / "groupbot" / "data" / "groupbot.db"
                 has_group = False
                 try:
@@ -3149,7 +3151,7 @@ USERBOT_USERNAME = "Skmusic001"
 def _queue_userbot_join(chat_id, invite_link):
     """ثبت درخواست join userbot در DB مشترک"""
     try:
-        import sqlite3 as _s
+        import turso_db as _s
         _c = _s.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"), timeout=5)
         _r = _c.execute("SELECT id FROM userbot_join_queue WHERE chat_id=? AND status='pending'", (chat_id,)).fetchone()
         if _r:

@@ -16,7 +16,9 @@ try:
     _ld(_os.path.expanduser("~/.env"))
 except Exception:
     pass
-BOT_TOKEN = _os.environ.get("MANAGER_BOT_TOKEN") or "8773395983:AAF1EqPpaAWBRaVW3MU0YLGixjZ1fDfysbk"
+BOT_TOKEN = _os.environ.get("MANAGER_BOT_TOKEN", "")
+if not BOT_TOKEN:
+    raise RuntimeError("MANAGER_BOT_TOKEN is not set (put it in ~/.env)")
 BOT_USERNAME = "@sk_team_mediaplayerbot"
 
 # --- مالک ربات ---
@@ -51,15 +53,15 @@ ANTISPAM_ENABLED = True
 ANTI_LINK_ENABLED = True
 
 # --- تنظیمات NSFW (Sightengine) ---
-SIGHTENGINE_USER = "1287410214"
-SIGHTENGINE_SECRET = "t59YWGUHJuTFk8zgKUkztFcxa3pmVtpU"
+SIGHTENGINE_USER = _os.environ.get("SIGHTENGINE_USER", "")
+SIGHTENGINE_SECRET = _os.environ.get("SIGHTENGINE_SECRET", "")
 
 
 # ========================================================
 # تنظیمات ربات موزیک پلیر (برای دریافت آمار کال)
 # ========================================================
 # این API_KEY رو توی ربات موزیک پلیر هم بذار (باید یکسان باشه)
-MUSIC_BOT_API_KEY = "SktTeam_vcstat_1791787127_secret"
+MUSIC_BOT_API_KEY = _os.environ.get("MUSIC_BOT_API_KEY", "")
 
 # آیدی عددی ربات موزیک پلیر (اگه ربات تلگرامه)
 MUSIC_BOT_ID = 0  # بعداً پر کن
@@ -73,5 +75,5 @@ MUSIC_BOT_TOKEN = ""  # بعداً پر کن
 # Music Player API (Lovable)
 # ═══════════════════════════════════════════════════
 MUSIC_API_BASE = "https://project--b8962080-6b65-4712-a6ea-051e02bdecb9.lovable.app/api/public/mgmt"
-MUSIC_MGMT_KEY = "d937f9a01bdeaa94521f4be8e47eab4086a6468052d23ac4"
-MUSIC_PLAYER_KEY = "74393374e3cb57cf291dfe089b937633a4b53ac2976fb70a"
+MUSIC_MGMT_KEY = _os.environ.get("MUSIC_MGMT_KEY", "")
+MUSIC_PLAYER_KEY = _os.environ.get("MUSIC_PLAYER_KEY", "")

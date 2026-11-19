@@ -1,6 +1,6 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import is_sub_active, get_sub_days_remaining, get_vcall_interval
-import sqlite3
+import turso_db as sqlite3
 from config import DATABASE_PATH
 from datetime import datetime
 

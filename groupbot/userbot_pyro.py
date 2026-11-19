@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pyrogram import Client
 from userbot_config import API_ID, API_HASH, STRING_SESSION
 from config import DATABASE_PATH
-import sqlite3
+import turso_db as sqlite3
 
 LOG_FILE = os.path.expanduser("~/userbot_service.log")
 

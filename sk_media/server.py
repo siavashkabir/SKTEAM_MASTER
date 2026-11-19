@@ -189,7 +189,7 @@ async def get_pending_files(request):
 
 async def api_groups(request):
     """لیست گروه‌ها از groupbot.db"""
-    import sqlite3
+    import turso_db as sqlite3
     from pathlib import Path
     try:
         db = Path.home() / "groupbot" / "data" / "groupbot.db"
@@ -205,7 +205,7 @@ async def api_groups(request):
 
 async def vcstat_report(request):
     """دریافت VCSTAT از player و ذخیره در groupbot.db"""
-    import sqlite3
+    import turso_db as sqlite3
     from pathlib import Path
     try:
         data = await request.json()

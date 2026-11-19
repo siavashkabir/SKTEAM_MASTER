@@ -16,7 +16,7 @@ BOT_DIR = os.path.expanduser("~/groupbot")
 # CHECK_INTERVAL از دیتابیس خونده می‌شه (قابل تنظیم از پنل)
 def get_check_interval():
     try:
-        import sqlite3
+        import turso_db as sqlite3
         from datetime import datetime
         db_path = os.path.expanduser("~/groupbot/data/groupbot.db")
         conn = sqlite3.connect(db_path)
@@ -107,7 +107,7 @@ def kill_bot():
 def is_monitor_enabled():
     """چک می‌کنه monitor فعاله یا نه"""
     try:
-        import sqlite3
+        import turso_db as sqlite3
         db_path = os.path.expanduser("~/groupbot/data/groupbot.db")
         conn = sqlite3.connect(db_path)
         c = conn.cursor()

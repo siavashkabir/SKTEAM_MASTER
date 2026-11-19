@@ -1,5 +1,5 @@
 from pathlib import Path
-import sqlite3
+import turso_db as sqlite3
 import os
 from datetime import datetime, timedelta
 from config import DATABASE_PATH
@@ -3458,7 +3458,7 @@ def mark_join_done(req_id, result):
 # ═══════════════════════════════════════════════
 def get_global(key, default=None):
     """خوندن یه تنظیم سراسری"""
-    import sqlite3
+    import turso_db as sqlite3
     from config import DATABASE_PATH
     try:
         c = sqlite3.connect(DATABASE_PATH)
@@ -3471,7 +3471,7 @@ def get_global(key, default=None):
 
 def set_global(key, value):
     """ذخیره یه تنظیم سراسری"""
-    import sqlite3
+    import turso_db as sqlite3
     import datetime
     from config import DATABASE_PATH
     try:
@@ -3503,7 +3503,7 @@ def get_global_float(key, default=0.0):
 
 def get_all_globals():
     """همه تنظیمات سراسری"""
-    import sqlite3
+    import turso_db as sqlite3
     from config import DATABASE_PATH
     try:
         c = sqlite3.connect(DATABASE_PATH)

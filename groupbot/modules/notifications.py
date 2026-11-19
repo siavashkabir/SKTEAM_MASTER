@@ -89,7 +89,7 @@ async def send_notification(context, chat_id, notif_type, text, force=False):
     """
     from database import is_group_owner, get_notif
     from config import DATABASE_PATH
-    import sqlite3
+    import turso_db as sqlite3
     try:
         # اگه force نبود، چک کن تنظیمات کاربر
         if not force:

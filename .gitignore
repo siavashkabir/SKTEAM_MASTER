@@ -8,3 +8,7 @@ __pycache__/
 cache/
 *.pyc
 .venv/
+telethon_session.txt
+.env.*
+cookies_yt.txt
+*.session-journal

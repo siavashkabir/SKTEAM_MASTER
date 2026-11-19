@@ -1,6 +1,6 @@
 def sub_menu(chat_id):
     from bot import _sub_is_active, _sub_days
-    import sqlite3
+    import turso_db as sqlite3
     from pathlib import Path
     _gdb = Path.home() / "groupbot" / "data" / "groupbot.db"
     NL = chr(10)

@@ -69,7 +69,7 @@ def get_admins_list(chat_id):
 
 def add_admin_to_db(chat_id, user_id, name):
     """اضافه کردن ادمین به دیتابیس"""
-    import sqlite3
+    import turso_db as sqlite3
     from config import DATABASE_PATH
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
@@ -81,7 +81,7 @@ def add_admin_to_db(chat_id, user_id, name):
 
 def get_group_admins_list(chat_id):
     """گرفتن لیست ادمین‌ها"""
-    import sqlite3
+    import turso_db as sqlite3
     from config import DATABASE_PATH
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()

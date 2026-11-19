@@ -121,7 +121,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from database import is_bot_admin, is_group_owner
         from config import OWNER_ID, DATABASE_PATH
-        import sqlite3
+        import turso_db as sqlite3
         if user.id == OWNER_ID:
             is_sudo = True
         elif is_bot_admin(user.id):
@@ -337,7 +337,7 @@ async def pv_owner_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE)
             from modules.start import sudo_panel_menu, group_owner_panel_menu
             from config import OWNER_ID
             from database import is_bot_admin, is_group_owner, DATABASE_PATH
-            import sqlite3
+            import turso_db as sqlite3
             is_sudo = (user.id == OWNER_ID)
             if not is_sudo:
                 try:

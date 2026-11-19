@@ -117,7 +117,7 @@ def _get_uptime():
 
 
 def _get_bot_stats():
-    import sqlite3
+    import turso_db as sqlite3
     info = {}
     info["uptime"] = time.time() - BOT_START_TIME
 

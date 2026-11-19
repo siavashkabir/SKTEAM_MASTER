@@ -16,7 +16,7 @@ def get_role(uid, cid):
     except:
         pass
     try:
-        import sqlite3
+        import turso_db as sqlite3
         conn = sqlite3.connect(str(Path.home() / "skteam_music" / "data" / "settings.db"), timeout=3)
         r = conn.execute("SELECT 1 FROM sk_group_owners WHERE chat_id=? AND user_id=?", (cid, uid)).fetchone()
         conn.close()

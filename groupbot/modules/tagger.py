@@ -1,4 +1,4 @@
-import sqlite3
+import turso_db as sqlite3
 import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import MessageHandler, filters, ContextTypes, CallbackQueryHandler

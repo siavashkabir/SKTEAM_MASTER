@@ -128,7 +128,7 @@ def build_access_menu(uid, chat_id, target_id, target_name, role, is_bot_owner_u
     # VIP یا member → VIP_PERMS
     # ★ ادمین → ADMIN_PERMS
     elif role == "admin":
-        import sqlite3
+        import turso_db as sqlite3
         from config import DATABASE_PATH
         try:
             conn = sqlite3.connect(DATABASE_PATH)

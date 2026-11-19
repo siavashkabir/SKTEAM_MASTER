@@ -376,7 +376,7 @@ def owner_sub_menu(uid, chat_id=0):
 
             if s_type == "manager":
 
-                import sqlite3
+                import turso_db as sqlite3
 
                 from config import DATABASE_PATH
 
@@ -1438,7 +1438,7 @@ async def do_refresh(update, context):
 
             # لیست گروه‌ها
 
-            import sqlite3
+            import turso_db as sqlite3
 
             from config import DATABASE_PATH
 
@@ -1545,12 +1545,12 @@ async def do_refresh(update, context):
         print(f"[CFG] db={len(_db_admins)}, tg={len(_tg_admins)}")
 
         # ★ خوندن username از members
-        import sqlite3
+        import turso_db as sqlite3
         from config import DATABASE_PATH
         # ★ اطلاعات اعضای گروه (از دیتابیس)
         _members_info = {}
         try:
-            import sqlite3 as _sq
+            import turso_db as _sq
             from config import DATABASE_PATH as _DBP
             _conn = _sq.connect(_DBP)
             _cur = _conn.cursor()
@@ -1893,7 +1893,7 @@ async def persian_handler(update, context):
 
             try:
 
-                import sqlite3 as _sq_ba
+                import turso_db as _sq_ba
 
                 from config import DATABASE_PATH as _dbp_ba
 
@@ -2237,7 +2237,7 @@ async def _get_owner_group(clicker_id, chat_id, parts):
 
             from database import is_group_owner as _igo
 
-            import sqlite3
+            import turso_db as sqlite3
 
             from config import DATABASE_PATH
 
@@ -2324,7 +2324,7 @@ async def handler(update, context):
             return
 
         try:
-            import sqlite3 as _sq
+            import turso_db as _sq
             from config import DATABASE_PATH as _DBP
             from database import get_group_admins
             import asyncio as _aio
@@ -3200,7 +3200,7 @@ async def handler(update, context):
 
         try:
 
-            import sqlite3
+            import turso_db as sqlite3
 
             from config import DATABASE_PATH
 
@@ -3266,7 +3266,7 @@ async def handler(update, context):
 
         try:
 
-            import sqlite3
+            import turso_db as sqlite3
 
             from config import DATABASE_PATH
 
@@ -5336,7 +5336,7 @@ async def handler(update, context):
 
             if _st == "manager":
 
-                import sqlite3 as _sq
+                import turso_db as _sq
 
                 from config import DATABASE_PATH as _dp
 
@@ -5408,7 +5408,7 @@ async def handler(update, context):
 
             if _st == "manager":
 
-                import sqlite3 as _sq
+                import turso_db as _sq
 
                 from config import DATABASE_PATH as _dp
 
@@ -6155,7 +6155,7 @@ async def handler(update, context):
             # چک دسترسی: باید مالک یه گروه باشه
             from database import is_group_owner
             # پیدا کردن یکی از گروه‌هایی که کاربر مالکشه
-            import sqlite3
+            import turso_db as sqlite3
             from config import DATABASE_PATH
             conn = sqlite3.connect(DATABASE_PATH)
             cur = conn.cursor()
@@ -6577,7 +6577,7 @@ async def handler(update, context):
             if not (_o or _s):
                 await query.answer("⛔ فقط سازنده و سودو", show_alert=True)
                 return
-            import sqlite3
+            import turso_db as sqlite3
             conn = sqlite3.connect(DATABASE_PATH)
             cur = conn.cursor()
             cur.execute("SELECT user_id FROM bot_admins ORDER BY user_id")
@@ -6604,7 +6604,7 @@ async def handler(update, context):
             if not (_o or _s):
                 await query.answer("⛔ فقط سازنده و سودو", show_alert=True)
                 return
-            import sqlite3
+            import turso_db as sqlite3
             conn = sqlite3.connect(DATABASE_PATH)
             cur = conn.cursor()
             cur.execute("SELECT chat_id, title FROM groups ORDER BY chat_id")
@@ -6754,7 +6754,7 @@ async def handler(update, context):
         try:
             _txt = "\U0001F451 \u0635\u0627\u062d\u0628\u0627\u0646 \u06af\u0631\u0648\u0647\n\n"
             try:
-                import sqlite3
+                import turso_db as sqlite3
                 from config import DATABASE_PATH
                 conn = sqlite3.connect(DATABASE_PATH)
                 cur = conn.cursor()
@@ -6849,7 +6849,7 @@ async def handler(update, context):
         try:
             _txt = "\u2b50 \u0627\u0639\u0636\u0627\u06cc \u0648\u06cc\u0698\u0647\n\n"
             try:
-                import sqlite3
+                import turso_db as sqlite3
                 from config import DATABASE_PATH
                 conn = sqlite3.connect(DATABASE_PATH)
                 cur = conn.cursor()

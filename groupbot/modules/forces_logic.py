@@ -161,7 +161,7 @@ async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         pay = get_payment_settings(group_chat_id)
         amount = pay[1] if pay else "?"
-        import sqlite3
+        import turso_db as sqlite3
         from config import DATABASE_PATH
         conn = sqlite3.connect(DATABASE_PATH)
         cur = conn.cursor()

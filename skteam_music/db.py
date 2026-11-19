@@ -1,5 +1,5 @@
 """db.py — خواندن از groupbot.db + settings.db"""
-import sqlite3
+import turso_db as sqlite3
 from pathlib import Path
 
 GB_DB = Path.home() / "groupbot" / "data" / "groupbot.db"

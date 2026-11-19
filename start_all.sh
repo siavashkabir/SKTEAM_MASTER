@@ -57,7 +57,7 @@ echo "▶ Player (proot)..."
 setsid proot-distro login ubuntu --isolated -- bash -c '
 cd /root/sk_media && \
 set -a && source /root/melody-player/.env && set +a && \
-export MUSIC_BOT_API_KEY="SktTeam_vcstat_1791787127_secret" && \
+export MUSIC_BOT_API_KEY="${MUSIC_BOT_API_KEY:?set MUSIC_BOT_API_KEY in ~/.env}" && \
 source /root/melody-player/venv/bin/activate && \
 exec python3 -u player.py
 ' < /dev/null > $HOME/sk_media/logs/player.log 2>&1 &

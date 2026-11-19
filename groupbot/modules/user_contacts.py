@@ -2,7 +2,7 @@
 import os
 import csv
 import json
-import sqlite3
+import turso_db as sqlite3
 import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (

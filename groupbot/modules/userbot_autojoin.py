@@ -81,7 +81,7 @@ async def on_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def auto_promote_job(context: ContextTypes.DEFAULT_TYPE):
     """job دوره‌ای: چک کن userbot عضوه ولی ادمین نیست → promote"""
     try:
-        import sqlite3
+        import turso_db as sqlite3
         from config import DATABASE_PATH
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()

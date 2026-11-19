@@ -57,7 +57,7 @@ async def find_target(msg, chat):
     except Exception:
         pass
     # جستجو در دیتابیس
-    import sqlite3
+    import turso_db as sqlite3
     from config import DATABASE_PATH
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -188,7 +188,7 @@ async def reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ خطا در عزل: " + str(e)[:200])
             return
         try:
-            import sqlite3
+            import turso_db as sqlite3
             from config import DATABASE_PATH
             conn = sqlite3.connect(DATABASE_PATH)
             cur = conn.cursor()

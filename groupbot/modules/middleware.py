@@ -30,7 +30,7 @@ async def check_group_active_message(update: Update, context: ContextTypes.DEFAU
 
     # ۲. بررسی اشتراک - هم groups هم subscriptions
     active = False
-    import sqlite3
+    import turso_db as sqlite3
     from config import DATABASE_PATH
     from datetime import datetime
 

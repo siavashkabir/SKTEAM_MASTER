@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from telegram.ext import CommandHandler
 from database import get_group, update_group, is_bot_admin
-import sqlite3
+import turso_db as sqlite3
 from config import DATABASE_PATH, OWNER_ID
 
 DATE_FMT = '%Y-%m-%d %H:%M:%S'
@@ -55,7 +55,7 @@ async def activate_cmd(update, context):
     # ===== محاسبه از تاریخ انقضای فعلی =====
     _base = datetime.now()
     try:
-        import sqlite3 as _sq_acc2
+        import turso_db as _sq_acc2
         from config import DATABASE_PATH as _DBP_acc2
         _cn_acc2 = _sq_acc2.connect(_DBP_acc2)
         _cr_acc2 = _cn_acc2.cursor()

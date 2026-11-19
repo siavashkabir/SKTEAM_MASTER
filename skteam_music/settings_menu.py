@@ -18,7 +18,7 @@ def _b(t, cb): return InlineKeyboardButton(t, callback_data=cb)
 
 def record_menu(chat_id):
     """منوی رکورد ویس‌کال"""
-    import sqlite3
+    import turso_db as sqlite3
     from pathlib import Path as _P
     _db = _P(__file__).parent / "data" / "settings.db"
     _clip = 300
@@ -70,7 +70,7 @@ def record_menu(chat_id):
 
 def record_clip_menu(chat_id):
     """انتخاب طول کلیپ با تیک روی فعلی"""
-    import sqlite3
+    import turso_db as sqlite3
     from pathlib import Path as _P
     _db = _P(__file__).parent / "data" / "settings.db"
     _clip = 300
@@ -152,7 +152,7 @@ def main_menu(chat_id, chat_title, user_name, is_owner):
 
 def sub_menu(chat_id):
     from bot import _sub_is_active, _sub_days
-    import sqlite3
+    import turso_db as sqlite3
     from pathlib import Path
     _gdb = Path.home() / "groupbot" / "data" / "groupbot.db"
     NL = chr(10)

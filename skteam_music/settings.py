@@ -1,5 +1,5 @@
 """Panel settings per-chat"""
-import sqlite3
+import turso_db as sqlite3
 from pathlib import Path
 
 BASE = Path(__file__).parent
@@ -57,7 +57,7 @@ def all_chats():
 
 # ─── Bot Config (Edit Message) ───
 def _cfg_init():
-    import sqlite3
+    import turso_db as sqlite3
     c = sqlite3.connect(str(DB))
     c.execute("""CREATE TABLE IF NOT EXISTS bot_config (
         key TEXT PRIMARY KEY,
@@ -94,7 +94,7 @@ CFG_DEFAULTS = {
 }
 
 def get_cfg(key, default=None):
-    import sqlite3
+    import turso_db as sqlite3
     try:
         c = sqlite3.connect(str(DB))
         r = c.execute("SELECT value FROM bot_config WHERE key=?", (key,)).fetchone()
@@ -123,7 +123,7 @@ def get_all_cfg():
     """همه config ها با default"""
     result = dict(CFG_DEFAULTS)
     try:
-        import sqlite3
+        import turso_db as sqlite3
         c = sqlite3.connect(str(DB))
         rows = c.execute("SELECT key, value FROM bot_config").fetchall()
         c.close()
@@ -143,7 +143,7 @@ _GB_DB = Path.home() / "groupbot" / "data" / "groupbot.db"
 def _get_global(key, default=None):
     """خوندن تنظیم سراسری از groupbot.db"""
     try:
-        import sqlite3 as _s
+        import turso_db as _s
         if not _GB_DB.exists():
             return default
         c = _s.connect(str(_GB_DB), timeout=3)
@@ -157,7 +157,7 @@ def _get_global(key, default=None):
 def _set_global(key, value):
     """ذخیره تنظیم سراسری در groupbot.db"""
     try:
-        import sqlite3 as _s
+        import turso_db as _s
         import datetime as _dt
         now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         c = _s.connect(str(_GB_DB), timeout=3)
