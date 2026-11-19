@@ -199,7 +199,17 @@ async def api_groups(request):
         rows = c.execute("SELECT chat_id FROM groups").fetchall()
         c.close()
         return web.json_response({"groups": [r[0] for r in rows]})
+    except sqlite3.OperationalError as e:
+        log(f"[api_groups] DB lock/unavailable: {e}")
+        return web.json_response({"groups": [], "err": "db unavailable"})
+    except sqlite3.DatabaseError as e:
+        log(f"[api_groups] DB error: {e}")
+        return web.json_response({"groups": [], "err": "db error"})
+    except FileNotFoundError as e:
+        log(f"[api_groups] File not found: {e}")
+        return web.json_response({"groups": [], "err": "file not found"})
     except Exception as e:
+        log(f"[api_groups] Unexpected error: {e}")
         return web.json_response({"groups": [], "err": str(e)})
 
 
@@ -237,8 +247,20 @@ async def vcstat_report(request):
         c.close()
         log(f"[vcstat] saved {len(users)} users for chat={chat_id} date={date}")
         return web.json_response({"ok": True, "saved": len(users)})
+    except sqlite3.OperationalError as e:
+        log(f"[vcstat] DB lock/unavailable: {e}")
+        return web.json_response({"ok": False, "err": "db unavailable"})
+    except sqlite3.IntegrityError as e:
+        log(f"[vcstat] DB integrity error: {e}")
+        return web.json_response({"ok": False, "err": "db integrity error"})
+    except sqlite3.DatabaseError as e:
+        log(f"[vcstat] DB error: {e}")
+        return web.json_response({"ok": False, "err": "db error"})
+    except (json.JSONDecodeError, KeyError) as e:
+        log(f"[vcstat] Invalid request data: {e}")
+        return web.json_response({"ok": False, "err": "invalid data"})
     except Exception as e:
-        log(f"[vcstat] err: {e}")
+        log(f"[vcstat] Unexpected error: {e}")
         return web.json_response({"ok": False, "err": str(e)})
 
 
