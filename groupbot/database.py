@@ -1,12 +1,49 @@
 from pathlib import Path
 import turso_db as sqlite3
+import logging
 import os
 from datetime import datetime, timedelta
 from config import DATABASE_PATH
 
+log = logging.getLogger("groupbot.database")
+
 os.makedirs(str(Path(__file__).resolve().parent / "data"), exist_ok=True)
 
 NSFW_DATE_FMT = "%Y-%m-%d %H:%M"
+
+
+def _safe_execute(sql, params=(), default=None, fetch=None):
+    """اجرای امن SQL: auto-close، error logging، retry logic"""
+    c = None
+    try:
+        c = sqlite3.connect(DATABASE_PATH, timeout=5)
+        result = c.execute(sql, params)
+        if fetch == "one":
+            return result.fetchone()
+        elif fetch == "all":
+            return result.fetchall()
+        else:
+            c.commit()
+            return getattr(result, 'rowcount', -1)
+    except sqlite3.OperationalError as e:
+        log.error(f"Database lock/unavailable: {e} [sql={sql[:50]}...]")
+        return default
+    except sqlite3.IntegrityError as e:
+        log.warning(f"Integrity constraint: {e} [sql={sql[:50]}...]")
+        return default
+    except sqlite3.DatabaseError as e:
+        log.error(f"Database error: {e} [sql={sql[:50]}...]")
+        return default
+    except Exception as e:
+        log.error(f"Unexpected error in SQL: {e} [sql={sql[:50]}...]")
+        return default
+    finally:
+        if c:
+            try:
+                c.close()
+            except Exception:
+                pass
+
 
 ADMIN_PERMS = [
     ("panel", "🔓 باز کردن پنل ربات"),
@@ -60,79 +97,72 @@ DEPUTY_PERMS = [
 
 
 def init_db():
+    """راه‌اندازی دیتابیس با error handling"""
+    c = None
+    try:
+        c = sqlite3.connect(DATABASE_PATH, timeout=5)
+    except sqlite3.OperationalError as e:
+        log.error(f"Cannot initialize database at {DATABASE_PATH}: {e}")
+        raise
 
-    conn = sqlite3.connect(DATABASE_PATH)
-    c = conn.cursor()
+    try:
+        cu = c.cursor()
 
-    # ===== جدول‌های آمار کال (برای هماهنگی با ربات موزیک پلیر) =====
-    c.execute("""CREATE TABLE IF NOT EXISTS voice_call_stats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        username TEXT,
-        first_name TEXT,
-        date TEXT NOT NULL,
-        total_seconds INTEGER DEFAULT 0,
-        session_count INTEGER DEFAULT 0,
-        updated_at TEXT,
-        UNIQUE(chat_id, user_id, date)
-    )""")
-    
-    c.execute("""CREATE TABLE IF NOT EXISTS voice_call_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        joined_at TEXT NOT NULL,
-        left_at TEXT,
-        duration_seconds INTEGER DEFAULT 0
-    )""")
-    
-    c.execute("""CREATE TABLE IF NOT EXISTS voice_call_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
-        date TEXT NOT NULL,
-        total_seconds INTEGER DEFAULT 0,
-        received_at TEXT,
-        UNIQUE(chat_id, date)
-    )""")
+        # ===== جدول‌های آمار کال (برای هماهنگی با ربات موزیک پلیر) =====
+        cu.execute("""CREATE TABLE IF NOT EXISTS voice_call_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            date TEXT NOT NULL,
+            total_seconds INTEGER DEFAULT 0,
+            session_count INTEGER DEFAULT 0,
+            updated_at TEXT,
+            UNIQUE(chat_id, user_id, date)
+        )""")
+        
+        cu.execute("""CREATE TABLE IF NOT EXISTS voice_call_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            joined_at TEXT NOT NULL,
+            left_at TEXT,
+            duration_seconds INTEGER DEFAULT 0
+        )""")
+        
+        cu.execute("""CREATE TABLE IF NOT EXISTS voice_call_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            total_seconds INTEGER DEFAULT 0,
+            received_at TEXT,
+            UNIQUE(chat_id, date)
+        )""")
 
-    c.execute("CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT, welcome_enabled INTEGER DEFAULT 1, welcome_text TEXT, expire_date TEXT, activated INTEGER DEFAULT 0)")
-    c.execute("CREATE TABLE IF NOT EXISTS locks (chat_id INTEGER, lock_name TEXT, is_enabled INTEGER DEFAULT 0, PRIMARY KEY (chat_id, lock_name))")
-    c.execute("CREATE TABLE IF NOT EXISTS settings (chat_id INTEGER, setting_name TEXT, value TEXT, PRIMARY KEY (chat_id, setting_name))")
-    c.execute("CREATE TABLE IF NOT EXISTS warns (chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))")
-    c.execute("CREATE TABLE IF NOT EXISTS vip_members (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT, expire_date TEXT, PRIMARY KEY (chat_id, user_id))")
-    c.execute("CREATE TABLE IF NOT EXISTS deputies (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT, PRIMARY KEY (chat_id, user_id))")
-    c.execute("CREATE TABLE IF NOT EXISTS group_owners (chat_id INTEGER PRIMARY KEY, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS deputy_perms (chat_id INTEGER, perm_name TEXT, is_enabled INTEGER DEFAULT 0, PRIMARY KEY (chat_id, perm_name))")
-    c.execute("CREATE TABLE IF NOT EXISTS user_perms (chat_id INTEGER, user_id INTEGER, perm_name TEXT, is_enabled INTEGER DEFAULT 1, PRIMARY KEY (chat_id, user_id, perm_name))")
-    c.execute("CREATE TABLE IF NOT EXISTS bot_admins (user_id INTEGER PRIMARY KEY, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS purge_schedule (chat_id INTEGER PRIMARY KEY, purge_time TEXT, sections TEXT, enabled INTEGER DEFAULT 0, last_run TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS nsfw_subs (chat_id INTEGER PRIMARY KEY, expire_date TEXT, enabled INTEGER DEFAULT 0, added_at TEXT)")
-    conn.commit()
-    conn.close()
-
-
-def init_members_table():
-    conn = sqlite3.connect(DATABASE_PATH)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS members (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, join_date TEXT, message_count INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))")
-    conn.commit()
-    conn.close()
-
-
-def init_bot_chats_table():
-    conn = sqlite3.connect(DATABASE_PATH)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS bot_chats (chat_id INTEGER PRIMARY KEY, title TEXT)")
-    conn.commit()
-    conn.close()
-
-
-def init_purge_table():
-    conn = sqlite3.connect(DATABASE_PATH)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS purge_schedule (chat_id INTEGER PRIMARY KEY, purge_time TEXT, sections TEXT, enabled INTEGER DEFAULT 0, last_run TEXT)")
-    conn.commit()
+        cu.execute("CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT, welcome_enabled INTEGER DEFAULT 1, welcome_text TEXT, expire_date TEXT, activated INTEGER DEFAULT 0)")
+        cu.execute("CREATE TABLE IF NOT EXISTS locks (chat_id INTEGER, lock_name TEXT, is_enabled INTEGER DEFAULT 0, PRIMARY KEY (chat_id, lock_name))")
+        cu.execute("CREATE TABLE IF NOT EXISTS settings (chat_id INTEGER, setting_name TEXT, value TEXT, PRIMARY KEY (chat_id, setting_name))")
+        cu.execute("CREATE TABLE IF NOT EXISTS warns (chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))")
+        cu.execute("CREATE TABLE IF NOT EXISTS vip_members (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT, expire_date TEXT, PRIMARY KEY (chat_id, user_id))")
+        cu.execute("CREATE TABLE IF NOT EXISTS deputies (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT, PRIMARY KEY (chat_id, user_id))")
+        cu.execute("CREATE TABLE IF NOT EXISTS group_owners (chat_id INTEGER PRIMARY KEY, user_id INTEGER, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT)")
+        cu.execute("CREATE TABLE IF NOT EXISTS deputy_perms (chat_id INTEGER, perm_name TEXT, is_enabled INTEGER DEFAULT 0, PRIMARY KEY (chat_id, perm_name))")
+        cu.execute("CREATE TABLE IF NOT EXISTS user_perms (chat_id INTEGER, user_id INTEGER, perm_name TEXT, is_enabled INTEGER DEFAULT 1, PRIMARY KEY (chat_id, user_id, perm_name))")
+        cu.execute("CREATE TABLE IF NOT EXISTS bot_admins (user_id INTEGER PRIMARY KEY, first_name TEXT, username TEXT, added_by INTEGER, added_at TEXT)")
+        cu.execute("CREATE TABLE IF NOT EXISTS purge_schedule (chat_id INTEGER PRIMARY KEY, purge_time TEXT, sections TEXT, enabled INTEGER DEFAULT 0, last_run TEXT)")
+        cu.execute("CREATE TABLE IF NOT EXISTS nsfw_subs (chat_id INTEGER PRIMARY KEY, expire_date TEXT, enabled INTEGER DEFAULT 0, added_at TEXT)")
+        cu.execute("CREATE TABLE IF NOT EXISTS members (chat_id INTEGER, user_id INTEGER, first_name TEXT, username TEXT, join_date TEXT, message_count INTEGER DEFAULT 0, PRIMARY KEY (chat_id, user_id))")
+        cu.execute("CREATE TABLE IF NOT EXISTS bot_chats (chat_id INTEGER PRIMARY KEY, title TEXT)")
+        
+        c.commit()
+        log.info("Database initialized successfully")
+    except sqlite3.DatabaseError as e:
+        log.error(f"Error creating tables: {e}")
+        raise
+    finally:
+        if c:
+            c.close()
     conn.close()
 
 

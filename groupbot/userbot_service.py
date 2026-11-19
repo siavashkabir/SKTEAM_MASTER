@@ -1,28 +1,8 @@
-#!/usr/bin/env python3
-# ═══ SK.TEAM Instance Lock ═══
-import fcntl as _sk_fcntl
-import sys as _sk_sys
-import os as _sk_os
-from pathlib import Path as _sk_P
-
-_sk_lock_handle = None
-def _sk_acquire_lock(_name):
-    global _sk_lock_handle
-    _sk_lock_path = _sk_P.home() / f".skteam_{_name}.lock"
-    try:
-        _sk_lock_handle = open(_sk_lock_path, 'w')
-        _sk_fcntl.flock(_sk_lock_handle, _sk_fcntl.LOCK_EX | _sk_fcntl.LOCK_NB)
-        _sk_lock_handle.write(str(_sk_os.getpid()))
-        _sk_lock_handle.flush()
-    except (IOError, OSError):
-        print(f"[SK-LOCK] Instance '{_name}' already running. Exiting.")
-        _sk_sys.exit(0)
-# ═══ end lock ═══
-
-"""Userbot Service — با Pyrogram + Telethon fallback"""
+"""Userbot Service — با Pyrogram + Telethon fallback + بهتر error handling"""
 import asyncio
 import os
 import sys
+import logging
 from datetime import datetime
 
 # ★ event loop قبل از import pyrogram
@@ -37,27 +17,35 @@ from config import DATABASE_PATH
 import turso_db as sqlite3
 
 LOG_FILE = os.path.expanduser("~/userbot_service.log")
-
-
-def log(msg):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line, flush=True)
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger("userbot_service")
 
 
 def get_pending():
+    """دریافت درخواست‌های زیربات در انتظار"""
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = sqlite3.connect(DATABASE_PATH, timeout=5)
         c = conn.cursor()
         c.execute("SELECT id, chat_id, msg_id, count, requested_by FROM purge_requests WHERE status = 'pending' ORDER BY id ASC LIMIT 10")
         rows = c.fetchall()
         conn.close()
         return rows
+    except sqlite3.OperationalError as e:
+        log.error(f"Database lock in get_pending: {e}")
+        return []
+    except sqlite3.DatabaseError as e:
+        log.error(f"Database error in get_pending: {e}")
+        return []
+    except Exception as e:
+        log.error(f"Unexpected error in get_pending: {e}")
+        return []
     except Exception as e:
         log(f"get_pending ERR: {e}")
         return []
