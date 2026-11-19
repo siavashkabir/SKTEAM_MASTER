@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SK Team AI Manager</title>
+    <link rel="stylesheet" href="style.css?v=50">
+    <script src="app.js?v=52"></script>
+    <script src="chat.js?v=52"></script>
+</head>
+<body>
+    <div id="toast" class="toast"></div>
+    <div id="login-screen">
+        <div class="glass" style="border-color: var(--neon-blue);">
+            <h2 style="margin-bottom: 20px;">🔐 SK Team Panel</h2>
+            <input type="password" id="password-input" placeholder="رمز عبور" onkeypress="if(event.key==='Enter') login()">
+            <div style="display:flex; align-items:center; justify-content:center; margin:15px 0;">
+                <input type="checkbox" id="remember-me" style="width:auto; margin:0 5px 0 0;">
+                <label for="remember-me" style="font-size:14px;">مرا به خاطر بسپار</label>
+            </div>
+            <button onclick="login()" style="width:100%; padding:14px; font-size:16px;">ورود</button>
+            <p style="font-size:14px; cursor:pointer; color:var(--neon-blue); margin-top:20px;" onclick="showOTP()">رمز عبور را فراموش کرده‌اید؟</p>
+            <div id="otp-box" class="hidden" style="margin-top:20px; border-top:1px solid var(--glass-border); padding-top:20px;">
+                <input type="number" id="otp-input" placeholder="کد ۶ رقمی">
+                <button onclick="verifyOTP()" style="width:100%;">تایید کد</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="main-panel" class="hidden" style="width:100%; display:flex; flex-direction:column; align-items:center;">
+        <header>
+            <h2 style="margin:0; font-size:22px;">Skteam Commander 🛠️</h2>
+            <div class="status-pill" onclick="checkStatus()">
+                <div id="status-dot" class="dot"></div>
+                <span id="status-text">در حال بررسی...</span>
+            </div>
+        </header>
+
+        <div class="glass">
+            <div class="tabs">
+                <div class="tab-btn active" onclick="switchTab('dashboard', this)">📊 داشبورد</div>
+                <div class="tab-btn" onclick="switchTab('bots', this)">🤖 ربات‌ها</div>
+                <div class="tab-btn" onclick="switchTab('ai', this)">✨ هوش مصنوعی</div>
+                <div class="tab-btn" onclick="switchTab('server', this)">💻 سرور</div>
+                <div class="tab-btn" onclick="switchTab('backup', this)">💾 بکاپ</div>
+                <div class="tab-btn" onclick="switchTab('settings', this)">⚙️ تنظیمات</div>
+                <div class="tab-btn" onclick="switchTab('debug', this)">🛠️ دیباگ</div>
+            </div>
+
+            <div id="tab-dashboard" class="tab-content active">
+                <h3 style="margin-top:0;">📊 مانیتورینگ سرور</h3>
+                <div class="dashboard-grid" id="metrics-container"><p style="color:var(--text-muted);">در حال دریافت...</p></div>
+                <h3 style="margin-top:30px;">🌐 وضعیت شبکه</h3>
+                <div class="widget" id="pings-container"><p style="color:var(--text-muted);">در حال تست...</p></div>
+            </div>
+
+            <div id="tab-bots" class="tab-content">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                    <h3 style="margin:0;">🤖 ربات‌های متصل</h3>
+                    <div style="display:flex; gap:10px;">
+                        <button onclick="loadGlobalLogs()" style="background:rgba(255,255,255,0.1); font-size:12px;">🌐 لاگ همه</button>
+                        <button id="scan-bots-btn" onclick="loadBots()" style="background:var(--success); font-size:12px;">🔄 اسکن</button>
+                    </div>
+                </div>
+                <div id="bots-container"><p style="text-align:center; color:var(--text-muted);">برای مشاهده ربات‌ها دکمه اسکن را بزنید.</p></div>
+                <div id="global-log-box" class="hidden" style="margin-top:20px;">
+                    <h3 style="font-size:14px; color:var(--neon-blue);">🌐 لاگ زنده مرکزی</h3>
+                    <div class="terminal" id="global-log-content" style="height:200px;"></div>
+                </div>
+            </div>
+
+            <div id="tab-ai" class="tab-content">
+                <div class="chat-header">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span id="active-model-name" style="font-size:13px; color:var(--neon-blue); font-weight:bold;">مدل: در حال دریافت...</span>
+                        <button onclick="rotateModel()" style="padding:4px 8px; font-size:14px;">🔄</button>
+                    </div>
+                    <button onclick="showModelsModal()" style="padding:8px 12px; font-size:12px; background:transparent; border:1px solid var(--glass-border);">لیست مدل‌ها</button>
+                </div>
+                <div id="ai-chat-history"><div class="msg ai">سلام سیاوش جان! من دستیار هوشمند شما هستم. چطور می‌تونم کمکتون کنم؟</div></div>
+                <div id="img-preview"><img id="img-preview-src" src=""><button onclick="clearImage()">✖</button></div>
+                <div class="input-area">
+                    <button class="icon-btn" onclick="document.getElementById('ai-file-input').click()">📎</button>
+                    <input type="file" id="ai-file-input" class="hidden" accept="image/*, .txt, .py, .js, .json, .md, .html, .css" onchange="handleFileUpload(event)">
+                    <button id="mic-btn" class="icon-btn mic" onclick="toggleMic()">🎤</button>
+                    <input type="text" id="ai-text-input" placeholder="پیام..." onkeypress="if(event.key==='Enter') sendAIMessage()">
+                    <button class="icon-btn send" onclick="sendAIMessage()">➡️</button>
+                </div>
+            </div>
+
+            <div id="tab-server" class="tab-content">
+                <h3 style="margin-top:0;">⚡ دستورات آماده</h3>
+                <div style="display:flex; flex-wrap:wrap; gap:5px; margin-bottom:20px;">
+                    <button class="quick-cmd-btn" onclick="runTerminalCmd('ls -la ~/skteam_bot')">📂 لیست فایل‌ها</button>
+                    <button class="quick-cmd-btn" onclick="runTerminalCmd('free -m')">🧠 وضعیت رم</button>
+                    <button class="quick-cmd-btn" onclick="runTerminalCmd('df -h /data')">💾 فضای هارد</button>
+                    <button class="quick-cmd-btn" onclick="runTerminalCmd('pkill -f main.py ; cd ~/skteam_bot && nohup python3 main.py > out.log 2>&1 &')">🔄 ری‌استارت ربات‌ها</button>
+                    <button class="quick-cmd-btn" onclick="runTerminalCmd('[RESTART_AGENT]')">⚙️ ری‌استارت ایجنت</button>
+                </div>
+                <h3>💻 ترمینال تحت وب</h3>
+                <div class="terminal" id="web-terminal" style="height:250px;">// سیستم آماده است...\n</div>
+                <div class="term-input-area">
+                    <span>root@skteam:~#</span>
+                    <input type="text" id="term-input" placeholder="دستور..." onkeypress="if(event.key==='Enter') runTerminalCmd()">
+                    <button onclick="runTerminalCmd()" style="margin:0; padding:5px 15px;">اجرا</button>
+                </div>
+                <h3 style="margin-top:30px;">📂 مدیریت فایل سرور</h3>
+                <div class="widget" style="display:flex; flex-direction:column; gap:10px;">
+                    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+                        <select id="upload-dest-select" style="margin:0; width:auto; padding:10px; background:#222; color:white; border:none; border-radius:5px;">
+                            <option value="~/skteam_bot/">📁 پوشه skteam_bot</option>
+                            <option value="~/storage/downloads/">📥 پوشه Downloads</option>
+                        </select>
+                        <button onclick="document.getElementById('file-upload-input').click()" style="background:var(--success); font-size:12px;">⬆️ آپلود فایل</button>
+                        <input type="file" id="file-upload-input" class="hidden" onchange="uploadFileToServer(event)">
+                    </div>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+                        <select id="download-dir-select" style="margin:0; width:auto; padding:10px; background:#222; color:white; border:none; border-radius:5px;">
+                            <option value="~/skteam_bot/">📁 پوشه skteam_bot</option>
+                            <option value="~/storage/downloads/">📥 پوشه Downloads</option>
+                        </select>
+                        <button onclick="openFileBrowser()" style="background:var(--warning); font-size:12px;">📂 مرور و دانلود فایل</button>
+                    </div>
+                </div>
+                <h3 style="margin-top:30px;">⏰ زمان‌بند کارها (Cron)</h3>
+                <div class="widget">
+                    <div style="display:flex; gap:10px; margin-bottom:10px;">
+                        <input type="text" id="cron-time" placeholder="زمان (مثلاً 03:00)" style="margin:0; width:120px;">
+                        <input type="text" id="cron-action" placeholder="دستور (مثلاً [RESTART_AGENT])" style="margin:0; flex:1;">
+                        <button onclick="addCronJob()" style="margin:0;">➕</button>
+                    </div>
+                    <div id="cron-list" style="font-size:13px;"></div>
+                </div>
+            </div>
+
+            <div id="tab-backup" class="tab-content">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                    <h3 style="margin:0;">💾 بکاپ‌گیری</h3>
+                    <button onclick="createBackup()" style="background:var(--success);">➕ ایجاد بکاپ جدید</button>
+                </div>
+                <div id="backups-container"></div>
+            </div>
+
+            <div id="tab-settings" class="tab-content">
+                <h3 style="margin-top:0;">⚙️ تنظیمات سیستم</h3>
+                <div class="widget" style="text-align:center; cursor:pointer; margin-bottom:10px;" onclick="document.getElementById('keys-modal').classList.remove('hidden')"><h4>🔑 مدیریت کلیدهای API</h4></div>
+                <div class="widget" style="text-align:center; cursor:pointer; margin-bottom:10px;" onclick="document.getElementById('modem-modal').classList.remove('hidden')"><h4>📡 تنظیمات مودم</h4></div>
+                <div class="widget" style="text-align:center; cursor:pointer; margin-bottom:10px;" onclick="document.getElementById('prompt-modal').classList.remove('hidden')"><h4>🧠 ویرایشگر پرامپت هوش مصنوعی</h4></div>
+                <div class="widget" style="text-align:center; cursor:pointer;" onclick="document.getElementById('code-editor-modal').classList.remove('hidden')"><h4>💻 ویرایشگر کد پنل</h4></div>
+                <div class="widget" style="text-align:center; cursor:pointer; margin-bottom:10px;" onclick="syncModelsFromSettings()"><h4>🔄 آپدیت لیست مدل‌ها</h4></div>
+                <div class="widget" style="text-align:center; cursor:pointer; margin-bottom:10px;" onclick="syncModelsFromSettings()"><h4>🔄 آپدیت لیست مدل‌ها</h4></div>
+            </div>
+
+            <div id="tab-debug" class="tab-content">
+                <h3 style="margin-top:0;">🛠️ ابزارهای دیباگ</h3>
+                <div style="display:flex; gap:10px; margin-bottom:15px; flex-wrap:wrap;">
+                    <button onclick="loadNetworkLogs()" style="flex:1; font-size:12px; min-width:120px;">📡 لاگ شبکه</button>
+                    <input type="date" id="history-date-filter" style="margin:0; padding:10px; width:auto; flex:1;">
+                    <button onclick="loadHistory()" style="flex:1; font-size:12px; min-width:120px;">📜 تاریخچه چت</button>
+                    <button onclick="clearAIChatHistory()" style="background:var(--danger); flex:1; font-size:12px; min-width:120px;">🗑️ پاک کردن</button>
+                </div>
+                <div id="debug-log-box" class="terminal" style="height:300px;">// لاگ‌ها...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="models-modal" class="modal hidden"><div class="modal-content"><h3>مدل‌ها</h3><div id="models-list" style="margin-bottom:15px; font-size:13px;"></div><button onclick="document.getElementById('models-modal').classList.add('hidden')" style="width:100%; background:var(--danger);">بستن</button></div></div>
+    <div id="keys-modal" class="modal hidden"><div class="modal-content"><h3>🔑 کلیدها</h3><div class="key-field"><label>Groq Key</label><input type="password" id="key-groq"><button class="eye-btn" onclick="togglePassword('key-groq', this)">👁️</button><div style="display:flex; gap:5px; margin-top:5px;"><button onclick="testKey('groq')" style="background:var(--warning); font-size:12px; flex:1;">🧪 تست</button><button onclick="applyKey('groq')" style="background:var(--success); font-size:12px; flex:1;">✅ ذخیره</button><button onclick="deleteKey('groq')" style="background:var(--danger); font-size:12px; flex:1;">🗑️ حذف</button></div></div><div class="key-field"><label>OpenRouter Key</label><input type="password" id="key-or"><button class="eye-btn" onclick="togglePassword('key-or', this)">👁️</button><div style="display:flex; gap:5px; margin-top:5px;"><button onclick="testKey('or')" style="background:var(--warning); font-size:12px; flex:1;">🧪 تست</button><button onclick="applyKey('or')" style="background:var(--success); font-size:12px; flex:1;">✅ ذخیره</button><button onclick="deleteKey('or')" style="background:var(--danger); font-size:12px; flex:1;">🗑️ حذف</button></div></div><div class="key-field"><label>DeepSeek Key</label><input type="password" id="key-ds"><button class="eye-btn" onclick="togglePassword('key-ds', this)">👁️</button><div style="display:flex; gap:5px; margin-top:5px;"><button onclick="testKey('deepseek')" style="background:var(--warning); font-size:12px; flex:1;">🧪 تست</button><button onclick="applyKey('deepseek')" style="background:var(--success); font-size:12px; flex:1;">✅ ذخیره</button><button onclick="deleteKey('deepseek')" style="background:var(--danger); font-size:12px; flex:1;">🗑️ حذف</button></div></div><button onclick="document.getElementById('keys-modal').classList.add('hidden')" style="width:100%; background:var(--danger); margin-top:10px;">بستن</button></div></div>
+    <div id="modem-modal" class="modal hidden"><div class="modal-content"><h3>📡 تنظیمات مودم</h3><div class="key-field"><label>IP</label><input type="text" id="modem-ip" value="192.168.199.1"><label style="margin-top:10px; display:block;">یوزرنیم</label><input type="text" id="modem-user" value="admin"><label style="margin-top:10px; display:block;">پسورد</label><input type="password" id="modem-pass" value="admin"><button onclick="saveModemSettings()" style="background:var(--success); width:100%; margin-top:15px;">ذخیره</button><button onclick="rebootModem()" style="background:var(--danger); width:100%; margin-top:5px;">🔄 ری‌استارت مودم</button></div><button onclick="document.getElementById('modem-modal').classList.add('hidden')" style="width:100%; background:#555;">بستن</button></div></div>
+    <div id="prompt-modal" class="modal hidden"><div class="modal-content"><h3>🧠 پرامپت AI</h3><textarea id="ai-prompt-textarea" style="height:200px; font-size:13px;"></textarea><button onclick="saveAIPrompt()" style="width:100%; background:var(--success); margin-top:10px;">💾 ذخیره</button><button onclick="document.getElementById('prompt-modal').classList.add('hidden')" style="width:100%; background:var(--danger);">بستن</button></div></div>
+    <div id="edit-modal" class="modal hidden"><div class="modal-content"><h3 style="color:var(--warning);">⚠️ تغییر فایل</h3><p id="edit-path" style="direction:ltr; text-align:left;"></p><textarea id="edit-content" style="height:150px; font-family:monospace; direction:ltr;" readonly></textarea><div style="display:flex; gap:10px; margin-top:15px;"><button onclick="approveEdit()" style="flex:1; background:var(--success);">✅ تایید</button><button onclick="document.getElementById('edit-modal').classList.add('hidden')" style="flex:1; background:var(--danger);">❌ لغو</button></div></div></div>
+    <div id="code-editor-modal" class="modal hidden"><div class="modal-content" style="max-width:900px;"><h3>💻 ویرایشگر کد</h3><select id="editor-file-select" onchange="loadFileForEdit()" style="width:100%; padding:10px; background:#222; color:white; border:none; border-radius:5px; margin-bottom:10px;"><option value="panel.html">panel.html</option><option value="style.css">style.css</option><option value="app.js">app.js</option><option value="chat.js">chat.js</option></select><textarea id="code-editor-textarea" class="code-editor"></textarea><div style="display:flex; gap:10px; margin-top:15px;"><button onclick="saveFileEdits()" style="flex:1; background:var(--success);">💾 ذخیره و دیپلوی</button><button onclick="document.getElementById('code-editor-modal').classList.add('hidden')" style="flex:1; background:var(--danger);">بستن</button></div></div></div>
+    <div id="file-browser-modal" class="modal hidden"><div class="modal-content"><h3>📂 مرور فایل‌ها</h3><p id="current-browser-path" style="font-size:12px; color:var(--neon-blue); direction:ltr; text-align:left;"></p><div id="file-browser-list" style="max-height:300px; overflow-y:auto; margin-bottom:15px; font-size:13px; direction:ltr; text-align:left;"></div><button onclick="document.getElementById('file-browser-modal').classList.add('hidden')" style="width:100%; background:var(--danger);">بستن</button></div></div>
+</body>
+</html>
