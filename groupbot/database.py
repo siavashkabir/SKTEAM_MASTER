@@ -34,14 +34,14 @@ def _safe_execute(sql, params=(), default=None, fetch=None):
     except sqlite3.DatabaseError as e:
         log.error(f"Database error: {e} [sql={sql[:50]}...]")
         return default
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         log.error(f"Unexpected error in SQL: {e} [sql={sql[:50]}...]")
         return default
     finally:
         if c:
             try:
                 c.close()
-            except Exception:
+            except (OSError, RuntimeError):
                 pass
 
 
@@ -245,7 +245,7 @@ def get_setting(chat_id, setting_name, default=None):
         if row:
             return row[0]
         return default
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET SETTING ERR] " + str(e))
         return default
 
@@ -258,7 +258,7 @@ def set_setting(chat_id, setting_name, value):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SET SETTING ERR] " + str(e))
         return False
 
@@ -360,7 +360,7 @@ def add_bot_admin(user_id, first_name, username, added_by):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[ADD BOT ADMIN ERR] " + str(e))
         return False
 
@@ -373,7 +373,7 @@ def remove_bot_admin(user_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[REMOVE BOT ADMIN ERR] " + str(e))
         return False
 
@@ -386,7 +386,7 @@ def is_bot_admin(user_id):
         row = c.fetchone()
         conn.close()
         return row is not None
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[IS BOT ADMIN ERR] " + str(e))
         return False
 
@@ -399,7 +399,7 @@ def get_all_bot_admins():
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET BOT ADMINS ERR] " + str(e))
         return []
 
@@ -417,7 +417,7 @@ def add_vip(chat_id, user_id, first_name, username, added_by, expire_date=None):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[ADD VIP ERR] " + str(e))
         return False
 
@@ -430,7 +430,7 @@ def remove_vip(chat_id, user_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[REMOVE VIP ERR] " + str(e))
         return False
 
@@ -450,9 +450,9 @@ def is_vip(chat_id, user_id):
         try:
             exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M")
             return exp > datetime.now()
-        except Exception:
+        except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
             return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[IS VIP ERR] " + str(e))
         return False
 
@@ -475,10 +475,10 @@ def get_all_vips(chat_id):
                     exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M")
                     if exp > now:
                         activated.append(r)
-                except Exception:
+                except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
                     activated.append(r)
         return activated
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET VIPS ERR] " + str(e))
         return []
 
@@ -496,7 +496,7 @@ def set_group_owner(chat_id, user_id, first_name, username, added_by):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SET GROUP OWNER ERR] " + str(e))
         return False
 
@@ -509,7 +509,7 @@ def remove_group_owner(chat_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[REMOVE GROUP OWNER ERR] " + str(e))
         return False
 
@@ -522,7 +522,7 @@ def get_group_owner(chat_id):
         row = c.fetchone()
         conn.close()
         return row
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET GROUP OWNER ERR] " + str(e))
         return None
 
@@ -535,7 +535,7 @@ def is_group_owner(chat_id, user_id):
         row = c.fetchone()
         conn.close()
         return row is not None
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[IS GROUP OWNER ERR] " + str(e))
         return False
 
@@ -553,7 +553,7 @@ def add_deputy(chat_id, user_id, first_name, username, added_by):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[ADD DEPUTY ERR] " + str(e))
         return False
 
@@ -566,7 +566,7 @@ def remove_deputy(chat_id, user_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[REMOVE DEPUTY ERR] " + str(e))
         return False
 
@@ -579,7 +579,7 @@ def is_deputy(chat_id, user_id):
         row = c.fetchone()
         conn.close()
         return row is not None
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[IS DEPUTY ERR] " + str(e))
         return False
 
@@ -592,7 +592,7 @@ def get_all_deputies(chat_id):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET DEPUTIES ERR] " + str(e))
         return []
 
@@ -609,7 +609,7 @@ def init_deputy_perms(chat_id):
             c.execute("INSERT OR IGNORE INTO deputy_perms (chat_id, perm_name, is_enabled) VALUES (?, ?, 1)", (chat_id, key))
         conn.commit()
         conn.close()
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[INIT DEPUTY PERMS ERR] " + str(e))
 
 
@@ -623,7 +623,7 @@ def get_deputy_perm(chat_id, perm_name):
         if row:
             return row[0] == 1
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET DEPUTY PERM ERR] " + str(e))
         return True
 
@@ -643,7 +643,7 @@ def toggle_deputy_perm(chat_id, perm_name):
         conn.commit()
         conn.close()
         return new_val
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[TOGGLE DEPUTY PERM ERR] " + str(e))
         return 0
 
@@ -656,7 +656,7 @@ def get_all_deputy_perms(chat_id):
         rows = c.fetchall()
         conn.close()
         return {name: (val == 1) for name, val in rows}
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET ALL DEPUTY PERMS ERR] " + str(e))
         return {}
 
@@ -673,7 +673,7 @@ def get_user_perms(chat_id, user_id):
         rows = c.fetchall()
         conn.close()
         return {name: (val == 1) for name, val in rows}
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET USER PERMS ERR] " + str(e))
         return {}
 
@@ -693,7 +693,7 @@ def toggle_user_perm(chat_id, user_id, perm_name):
         conn.commit()
         conn.close()
         return new_val
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[TOGGLE USER PERM ERR] " + str(e))
         return 0
 
@@ -708,7 +708,7 @@ def has_user_perm(chat_id, user_id, perm_name, default=True):
         if row:
             return row[0] == 1
         return default
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[HAS USER PERM ERR] " + str(e))
         return default
 
@@ -729,7 +729,7 @@ def get_nsfw_sub(chat_id):
             if row:
                 conn.close()
                 return {"expire_date": row[0], "enabled": row[1] or 0, "added_at": None}
-        except Exception:
+        except (OSError, RuntimeError):
             pass
         # ★ fallback: nsfw_subs (جدول قدیمی)
         try:
@@ -738,11 +738,11 @@ def get_nsfw_sub(chat_id):
             if row:
                 conn.close()
                 return {"expire_date": row[0], "enabled": row[1] or 0, "added_at": row[2]}
-        except Exception:
+        except (OSError, RuntimeError):
             pass
         conn.close()
         return {"expire_date": None, "enabled": 0, "added_at": None}
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET NSFW SUB ERR] " + str(e))
         return {"expire_date": None, "enabled": 0, "added_at": None}
 
@@ -762,12 +762,12 @@ def set_nsfw_sub(chat_id, expire_date, enabled):
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
             c.execute("INSERT OR REPLACE INTO nsfw_subs (chat_id, expire_date, enabled, added_at) VALUES (?, ?, ?, ?)", 
                      (chat_id, expire_date, 1 if enabled else 0, now))
-        except Exception:
+        except (OSError, RuntimeError):
             pass
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SET NSFW SUB ERR] " + str(e))
         return False
 
@@ -786,10 +786,10 @@ def is_nsfw_sub_activated(chat_id):
             try:
                 exp = datetime.strptime(expire, fmt)
                 return exp > datetime.now()
-            except Exception:
+            except (OSError, RuntimeError):
                 continue
         return False
-    except Exception:
+    except (OSError, RuntimeError):
         return False
 
 
@@ -806,10 +806,10 @@ def get_nsfw_remaining(chat_id):
                 if delta.total_seconds() <= 0:
                     return 0
                 return delta.days
-            except Exception:
+            except (OSError, RuntimeError):
                 continue
         return None
-    except Exception:
+    except (OSError, RuntimeError):
         return None
 
 
@@ -981,7 +981,7 @@ def check_active(chat_id):
             exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M")
             if exp < datetime.now():
                 return False
-        except Exception:
+        except (OSError, RuntimeError):
             pass
     
     return True
@@ -1036,13 +1036,13 @@ def is_sub_active(chat_id, sub_type):
             exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M:%S")
             if exp < datetime.now():
                 return False
-        except Exception:
+        except (OSError, RuntimeError):
             try:
                 from datetime import datetime
                 exp = datetime.strptime(expire_date, "%Y-%m-%d %H:%M")
                 if exp < datetime.now():
                     return False
-            except Exception:
+            except (OSError, RuntimeError):
                 pass
     return True
 
@@ -1061,9 +1061,9 @@ def get_sub_days_remaining(chat_id, sub_type):
                 exp = datetime.strptime(expire_date, fmt)
                 delta = exp - datetime.now()
                 return max(0, delta.days)
-            except Exception:
+            except (OSError, RuntimeError):
                 continue
-    except Exception:
+    except (OSError, RuntimeError):
         pass
     return 0
 
@@ -1085,7 +1085,7 @@ def get_vcall_interval(chat_id):
         return 5
     try:
         return int(row[2])
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return 5
 
 
@@ -1133,7 +1133,7 @@ def is_sub_active(chat_id, sub_type):
                 if exp < datetime.now():
                     return False
                 break
-            except Exception:
+            except (OSError, RuntimeError):
                 continue
     return True
 
@@ -1151,7 +1151,7 @@ def get_sub_days_remaining(chat_id, sub_type):
             exp = datetime.strptime(expire_date, fmt)
             delta = exp - datetime.now()
             return max(0, delta.days)
-        except Exception:
+        except (OSError, RuntimeError):
             continue
     return 0
 
@@ -1171,7 +1171,7 @@ def get_vcall_interval(chat_id):
         return 5
     try:
         return int(row[2])
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return 5
 
 
@@ -1241,13 +1241,13 @@ def extend_subscription(chat_id, sub_type, days):
             if exp > datetime.now():
                 base = exp
                 was_active = True
-        except Exception:
+        except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
             try:
                 exp = datetime.strptime(row[0], "%Y-%m-%d %H:%M")
                 if exp > datetime.now():
                     base = exp
                     was_active = True
-            except Exception:
+            except (OSError, RuntimeError):
                 pass
     
     new_exp = (base + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -1701,7 +1701,7 @@ def increment_msg(chat_id, user_id, username, first_name, is_ad=False):
                      updated_at = excluded.updated_at""",
                   (chat_id, user_id, username, first_name, ad_inc, now, ad_inc))
         conn.commit()
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[INC MSG ERR] " + str(e))
     finally:
         conn.close()
@@ -1796,7 +1796,7 @@ def log_group_event(chat_id, event_type, target_user, actor_user=None):
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                   (chat_id, event_type, t_id, t_un, t_fn, a_id, a_un, a_fn, today, now))
         conn.commit()
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[LOG EVENT ERR] " + str(e))
     finally:
         conn.close()
@@ -1873,7 +1873,7 @@ def is_fj_exempt(user_id):
         r = c.fetchone()
         conn.close()
         return r is not None
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return False
 
@@ -1895,7 +1895,7 @@ def can_exempt_fj(user_id):
         r = c.fetchone()
         conn.close()
         return bool(r and r[0])
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return False
 
@@ -1909,7 +1909,7 @@ def get_global_force_join():
         r = c.fetchone()
         conn.close()
         return r
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return None
 
@@ -1937,7 +1937,7 @@ def is_fj_enabled():
     try:
         v = get_setting(0, "fj_enabled", "0")
         return str(v) == "1"
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return False
 
 
@@ -1946,7 +1946,7 @@ def set_fj_enabled(enabled):
     try:
         set_setting(0, "fj_enabled", "1" if enabled else "0")
         return True
-    except Exception as e:
+    except (ValueError, TypeError) as e:
         print("[SET FJ ENABLED ERR] " + str(e))
         return False
 
@@ -1959,7 +1959,7 @@ def is_bot_owner_or_sudo(user_id):
         from config import OWNER_ID
         if user_id == OWNER_ID:
             return True
-    except Exception:
+    except (ValueError, TypeError):
         pass
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -1968,7 +1968,7 @@ def is_bot_owner_or_sudo(user_id):
         r = c.fetchone()
         conn.close()
         return r is not None
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[IS OWNER/SUDO ERR] " + str(e))
         return False
 
@@ -1984,7 +1984,7 @@ def get_expire(chat_id):
         if r and r[1] and r[0]:
             return r[0]
         return None
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET EXPIRE ERR] " + str(e))
         return None
 
@@ -2025,7 +2025,7 @@ def add_to_global_blacklist(user_id, username, first_name, added_by, reason=""):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GBL ADD ERR]", str(e))
         return False
 
@@ -2039,7 +2039,7 @@ def remove_from_global_blacklist(user_id):
         affected = c.rowcount
         conn.close()
         return affected > 0
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GBL DEL ERR]", str(e))
         return False
 
@@ -2060,7 +2060,7 @@ def is_global_blacklisted(user_id, username=None):
                 return True
         conn.close()
         return False
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GBL CHK ERR]", str(e))
         return False
 
@@ -2073,7 +2073,7 @@ def get_all_global_blacklist():
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GBL LIST ERR]", str(e))
         return []
 
@@ -2089,7 +2089,7 @@ def log_gbl_action(user_id, chat_id, action, performed_by):
                   (user_id, chat_id, action, performed_by, now))
         conn.commit()
         conn.close()
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GBL LOG ERR]", str(e))
 
 
@@ -2123,7 +2123,7 @@ def record_spam_ban(user_id, chat_id, reason, banned_by):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SPAM RECORD ERR]", str(e))
         return False
 
@@ -2137,7 +2137,7 @@ def get_spam_count(user_id):
         cnt = c.fetchone()[0]
         conn.close()
         return cnt
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SPAM COUNT ERR]", str(e))
         return 0
 
@@ -2153,7 +2153,7 @@ def get_spam_record(user_id):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SPAM RECORD ERR]", str(e))
         return []
 
@@ -2170,7 +2170,7 @@ def get_all_spam_users(min_count=1):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SPAM ALL ERR]", str(e))
         return []
 
@@ -2188,7 +2188,7 @@ def remove_spam_record(user_id, chat_id=None):
         conn.commit()
         conn.close()
         return cnt
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SPAM DEL ERR]", str(e))
         return 0
 
@@ -2202,7 +2202,7 @@ def mark_spam_global(user_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SPAM MARK ERR]", str(e))
         return False
 
@@ -2212,7 +2212,7 @@ def get_setting_int(chat_id, name, default=0):
     try:
         val = get_setting(chat_id, name, str(default))
         return int(val)
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return default
 
 
@@ -2270,7 +2270,7 @@ def upsert_user_contact(user_id, first_name=None, last_name=None, username=None,
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[UPSERT CONTACT ERR]", str(e))
         return False
 
@@ -2282,7 +2282,7 @@ def increment_user_groups_count(user_id):
         c.execute("UPDATE user_contacts SET groups_count = groups_count + 1 WHERE user_id=?", (user_id,))
         conn.commit()
         conn.close()
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[INC GROUPS ERR]", str(e))
 
 
@@ -2296,7 +2296,7 @@ def get_user_contact(user_id):
         row = c.fetchone()
         conn.close()
         return row
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET CONTACT ERR]", str(e))
         return None
 
@@ -2315,7 +2315,7 @@ def get_contacts_stats():
         premium = c.fetchone()[0]
         conn.close()
         return {"total": total, "started": started, "in_groups": in_groups, "premium": premium}
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[STATS ERR]", str(e))
         return {"total": 0, "started": 0, "in_groups": 0, "premium": 0}
 
@@ -2335,7 +2335,7 @@ def get_all_user_contacts(started_only=False):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET ALL CONTACTS ERR]", str(e))
         return []
 
@@ -2348,7 +2348,7 @@ def delete_user_contact(user_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[DEL CONTACT ERR]", str(e))
         return False
 
@@ -2363,7 +2363,7 @@ def vacuum_database():
         conn.close()
         size_after = os.path.getsize(DATABASE_PATH)
         return size_before, size_after, True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[VACUUM ERR]", str(e))
         return 0, 0, False
 
@@ -2377,7 +2377,7 @@ def check_db_integrity():
         result = c.fetchone()[0]
         conn.close()
         return result
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[INTEGRITY ERR]", str(e))
         return "error: " + str(e)
 
@@ -2394,11 +2394,11 @@ def get_db_stats():
             try:
                 c.execute(f"SELECT COUNT(*) FROM {t}")
                 stats[t] = c.fetchone()[0]
-            except Exception:
+            except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
                 stats[t] = -1
         conn.close()
         return stats
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[DB STATS ERR]", str(e))
         return {}
 
@@ -2415,7 +2415,7 @@ def cleanup_old_records(days_stats=30, days_events=999999):
         try:
             c.execute("DELETE FROM msg_stats_daily WHERE date < ?", (cutoff_stats,))
             results["msg_stats_daily"] = c.rowcount
-        except Exception:
+        except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
             results["msg_stats_daily"] = 0
 
         # members, group_events, spam_tracker, global_blacklist, user_contacts هرگز پاک نمی‌شن
@@ -2426,7 +2426,7 @@ def cleanup_old_records(days_stats=30, days_events=999999):
 
         conn.commit()
         conn.close()
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[CLEANUP ERR]", str(e))
     return results
 
@@ -2446,7 +2446,7 @@ def truncate_log_file(keep_lines=5000):
             f.writelines(lines[-keep_lines:])
         size_after = os.path.getsize(log_path)
         return size_before, size_after
-    except Exception as e:
+    except OSError as e:
         print("[LOG TRUNC ERR]", str(e))
         return 0, 0
 
@@ -2470,9 +2470,9 @@ def cleanup_temp_files():
                         total_size += os.path.getsize(fp)
                         os.remove(fp)
                         count += 1
-                except Exception:
+                except OSError:
                     pass
-    except Exception as e:
+    except OSError as e:
         print("[TEMP CLEAN ERR]", str(e))
     return count, total_size
 
@@ -2494,9 +2494,9 @@ def cleanup_old_backups(keep_days=7):
                     freed += os.path.getsize(f)
                     os.remove(f)
                     deleted += 1
-            except Exception:
+            except OSError:
                 pass
-    except Exception as e:
+    except OSError as e:
         print("[BACKUP CLEAN ERR]", str(e))
     return deleted, freed
 
@@ -2543,7 +2543,7 @@ def save_voice_call_participants(chat_id, users_list):
         cnt = len(users_list)
         conn.close()
         return cnt
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[VCH SAVE ERR]", str(e))
         return 0
 
@@ -2558,7 +2558,7 @@ def get_voice_call_participants(chat_id):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[VCH GET ERR]", str(e))
         return []
 
@@ -2572,7 +2572,7 @@ def get_voice_call_save_time(chat_id):
         r = c.fetchone()
         conn.close()
         return r[0] if r else None
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return None
 
 
@@ -2583,12 +2583,12 @@ def get_chat_cooldown(chat_id):
         v = get_setting(chat_id, "cooldown_seconds", "")
         if v != "":
             return int(v)
-    except Exception:
+    except (OSError, RuntimeError):
         pass
     try:
         v = get_setting(0, "sys_cooldown_seconds", "30")
         return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         return 30
 
 
@@ -2596,7 +2596,7 @@ def set_chat_cooldown(chat_id, seconds):
     try:
         set_setting(chat_id, "cooldown_seconds", str(int(seconds)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2605,12 +2605,12 @@ def get_chat_panel_delete(chat_id):
         v = get_setting(chat_id, "panel_delete_time", "")
         if v != "":
             return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         pass
     try:
         v = get_setting(0, "sys_panel_delete_time", "30")
         return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         return 30
 
 
@@ -2618,7 +2618,7 @@ def set_chat_panel_delete(chat_id, seconds):
     try:
         set_setting(chat_id, "panel_delete_time", str(int(seconds)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2631,12 +2631,12 @@ def get_chat_panel_timeout(chat_id):
         v = get_setting(chat_id, "panel_timeout_seconds", "")
         if v != "":
             return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         pass
     try:
         v = get_setting(0, "sys_panel_timeout_seconds", "300")
         return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         return 300
 
 
@@ -2644,7 +2644,7 @@ def set_chat_panel_timeout(chat_id, seconds):
     try:
         set_setting(chat_id, "panel_timeout_seconds", str(int(seconds)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2654,12 +2654,12 @@ def get_chat_expire_delete(chat_id):
         v = get_setting(chat_id, "expire_delete_seconds", "")
         if v != "":
             return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         pass
     try:
         v = get_setting(0, "sys_expire_delete_seconds", "20")
         return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         return 20
 
 
@@ -2667,7 +2667,7 @@ def set_chat_expire_delete(chat_id, seconds):
     try:
         set_setting(chat_id, "expire_delete_seconds", str(int(seconds)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2679,11 +2679,11 @@ def get_ai_setting(chat_id, name, default=""):
         v = get_setting(chat_id, "ai_" + name, "")
         if v != "":
             return v
-    except Exception:
+    except (ValueError, TypeError):
         pass
     try:
         return get_setting(0, "ai_" + name, default)
-    except Exception:
+    except (OSError, RuntimeError):
         return default
 
 
@@ -2692,7 +2692,7 @@ def set_ai_setting(chat_id, name, value):
     try:
         set_setting(chat_id, "ai_" + name, str(value))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2710,7 +2710,7 @@ def get_ai_usage_today(chat_id=None):
         r = c.fetchone()
         conn.close()
         return r[0] if r else 0
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return 0
 
 
@@ -2724,7 +2724,7 @@ def log_ai_usage(chat_id, user_id):
                   (chat_id, user_id, now))
         conn.commit()
         conn.close()
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[AI LOG ERR]", str(e))
 
 
@@ -2736,12 +2736,12 @@ def get_chat_ai_delete(chat_id):
         v = get_setting(chat_id, "ai_delete_seconds", "")
         if v != "":
             return int(v)
-    except Exception:
+    except (OSError, RuntimeError):
         pass
     try:
         v = get_setting(0, "sys_ai_delete_seconds", "0")
         return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         return 0
 
 
@@ -2749,7 +2749,7 @@ def set_chat_ai_delete(chat_id, seconds):
     try:
         set_setting(chat_id, "ai_delete_seconds", str(int(seconds)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2784,7 +2784,7 @@ def log_raid_event(chat_id, action, users_count):
         row_id = c.lastrowid
         conn.close()
         return row_id
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[RAID LOG ERR]", str(e))
         return None
 
@@ -2798,7 +2798,7 @@ def end_raid_event(row_id):
         conn.commit()
         conn.close()
         return True
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return False
 
 
@@ -2812,7 +2812,7 @@ def get_raid_history(chat_id, limit=10):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return []
 
 
@@ -2822,11 +2822,11 @@ def get_chat_raid_setting(chat_id, name, default=""):
         v = get_setting(chat_id, "raid_" + name, "")
         if v != "":
             return v
-    except Exception:
+    except (OSError, RuntimeError):
         pass
     try:
         return get_setting(0, "raid_" + name, default)
-    except Exception:
+    except (OSError, RuntimeError):
         return default
 
 
@@ -2834,7 +2834,7 @@ def set_chat_raid_setting(chat_id, name, value):
     try:
         set_setting(chat_id, "raid_" + name, str(value))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2846,7 +2846,7 @@ def get_chat_panel_warning(chat_id):
         if v is None:
             return int(get_setting(0, "panel_warning_enabled", "0") or 0)
         return int(v)
-    except Exception:
+    except (ValueError, TypeError):
         return 0
 
 
@@ -2855,7 +2855,7 @@ def set_chat_panel_warning(chat_id, enabled):
     try:
         set_setting(chat_id, "panel_warning_enabled", str(int(enabled)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2863,7 +2863,7 @@ def get_sudo_timer_access():
     """بررسی دسترسی سودو به تنظیمات تایمر"""
     try:
         return int(get_setting(0, "sudo_timer_access", "0") or 0)
-    except Exception:
+    except (ValueError, TypeError):
         return 0
 
 
@@ -2872,7 +2872,7 @@ def set_sudo_timer_access(enabled):
     try:
         set_setting(0, "sudo_timer_access", str(int(enabled)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2897,7 +2897,7 @@ def add_report(gid, gtitle, rep_id, rep_name, rep_user, ru_id, ru_name, ru_user,
         conn.commit()
         conn.close()
         return rid
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[ADD REPORT ERR] " + str(e))
         return None
 
@@ -2914,7 +2914,7 @@ def get_pending_reports(gid, limit=100):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET PENDING ERR] " + str(e))
         return []
 
@@ -2927,7 +2927,7 @@ def count_pending_reports(gid):
         n = c.fetchone()[0]
         conn.close()
         return n
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return 0
 
 
@@ -2939,7 +2939,7 @@ def update_report_status(rid, status):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[UPDATE REPORT ERR] " + str(e))
         return False
 
@@ -2955,18 +2955,18 @@ def count_user_reports_today(rep_id, gid):
         n = c.fetchone()[0]
         conn.close()
         return n
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return 0
 
 
 def get_report_settings(cid):
     try:
         dl = int(get_setting(cid, "report_daily_limit", "3") or 3)
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         dl = 3
     try:
         cd = int(get_setting(cid, "report_cooldown", "300") or 300)
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         cd = 300
     return dl, cd
 
@@ -2975,7 +2975,7 @@ def set_report_daily_limit(cid, value):
     try:
         set_setting(cid, "report_daily_limit", str(int(value)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -2983,14 +2983,14 @@ def set_report_cooldown(cid, value):
     try:
         set_setting(cid, "report_cooldown", str(int(value)))
         return True
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
 def fmt_rep_cd(seconds):
     try:
         s = int(seconds)
-    except Exception:
+    except (ValueError, TypeError):
         return str(seconds)
     if s < 60:
         return f"{s} ثانیه"
@@ -3011,7 +3011,7 @@ def get_all_global_force_joins():
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         conn.close()
         print("[GET ALL FJ ERR] " + str(e))
         return []
@@ -3026,7 +3026,7 @@ def add_global_force_join(target_id, target_link, target_name):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[ADD FJ ERR] " + str(e))
         conn.close()
         return False
@@ -3040,7 +3040,7 @@ def remove_global_force_join_by_id(fid):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[DEL FJ ID ERR] " + str(e))
         conn.close()
         return False
@@ -3093,7 +3093,7 @@ def set_log_channel(scope, owner_chat_id, channel_id, channel_title, user_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SET LOG CH ERR] " + str(e))
         conn.close()
         return False
@@ -3107,7 +3107,7 @@ def get_log_channel(scope, owner_chat_id=0):
         r = c.fetchone()
         conn.close()
         return r
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return None
 
@@ -3120,7 +3120,7 @@ def remove_log_channel(scope, owner_chat_id=0):
         conn.commit()
         conn.close()
         return True
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return False
 
@@ -3133,7 +3133,7 @@ def toggle_log_channel(scope, owner_chat_id, enabled):
         conn.commit()
         conn.close()
         return True
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return False
 
@@ -3149,7 +3149,7 @@ def get_all_log_channels(scope=None):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return []
 
@@ -3166,7 +3166,7 @@ def archive_log_event(scope, chat_id, action, actor_id, actor_name, target_id, t
         new_id = c.lastrowid
         conn.close()
         return new_id
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[ARCHIVE LOG ERR] " + str(e))
         conn.close()
         return None
@@ -3192,7 +3192,7 @@ def get_log_events(action=None, chat_id=None, actor_id=None, target_id=None, lim
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[GET LOG EVENTS ERR] " + str(e))
         conn.close()
         return []
@@ -3215,7 +3215,7 @@ def count_log_events(action=None, chat_id=None, days=None):
         r = c.fetchone()
         conn.close()
         return r[0] if r else 0
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return 0
 
@@ -3229,7 +3229,7 @@ def log_stats_by_chat(days=30):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return []
 
@@ -3249,7 +3249,7 @@ def save_system_stats(ping_ms, ram_mb, cpu_pct, disk_mb, db_kb, api_calls, err_c
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[SAVE SYS STATS ERR] " + str(e))
         conn.close()
         return False
@@ -3263,7 +3263,7 @@ def get_latest_system_stats():
         r = c.fetchone()
         conn.close()
         return r
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         conn.close()
         return None
 # [LOG-SYSTEM-END]
@@ -3295,7 +3295,7 @@ def add_admin_to_db(chat_id, user_id, name):
         conn.close()
         print(f"[DB] add_admin_to_db: chat={chat_id}, user={user_id}, name={name}")
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[DB ERR] add_admin_to_db: {e}")
         return False
 
@@ -3309,7 +3309,7 @@ def is_admin(chat_id, user_id):
         row = c.fetchone()
         conn.close()
         return row is not None
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[IS ADMIN ERR] {e}")
         return False
 
@@ -3323,7 +3323,7 @@ def get_all_admins(chat_id):
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[GET ALL ADMINS ERR] {e}")
         return []
 
@@ -3337,7 +3337,7 @@ def remove_admin_from_db(chat_id, user_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[DB ERR] remove_admin_from_db: {e}")
         return False
 
@@ -3351,7 +3351,7 @@ def remove_admin_from_db(chat_id, user_id):
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[DB ERR] remove_admin_from_db: {e}")
         return False
 
@@ -3365,7 +3365,7 @@ def get_group_admins_db(chat_id):
         rows = c.fetchall()
         conn.close()
         return [{"user_id": r[0], "name": r[1]} for r in rows]
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[DB ERR] get_group_admins_db: {e}")
         return []
 
@@ -3379,7 +3379,7 @@ def get_group_admins(chat_id):
         rows = c.fetchall()
         conn.close()
         return [{"user_id": r[0], "name": r[1]} for r in rows]
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[DB ERR] get_group_admins: {e}")
         return []
 
@@ -3394,7 +3394,7 @@ def admin_list_menu(uid, chat_id, admins):
     try:
         from modules.admin_perms import admin_list_menu as _alm
         return _alm(uid, chat_id, admins)
-    except Exception as e:
+    except (ValueError, TypeError) as e:
         print(f"[ADMIN LIST ALIAS ERR] {e}")
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         return InlineKeyboardMarkup([
@@ -3417,7 +3417,7 @@ def queue_purge(chat_id, msg_id, count, requested_by):
         conn.close()
         print(f"[QUEUE PURGE] id={req_id}, chat={chat_id}, count={count}")
         return req_id
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[QUEUE PURGE ERR] {e}")
         return None
 
@@ -3431,7 +3431,7 @@ def get_purge_result(req_id):
         row = c.fetchone()
         conn.close()
         return row
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[GET PURGE ERR] {e}")
         return None
 
@@ -3454,7 +3454,7 @@ def queue_userbot_join(chat_id, invite_link):
         conn.close()
         print(f"[QUEUE JOIN] id={req_id}, chat={chat_id}")
         return req_id
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[QUEUE JOIN ERR] {e}")
         return None
 
@@ -3468,7 +3468,7 @@ def get_pending_joins():
         rows = c.fetchall()
         conn.close()
         return rows
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[GET JOINS ERR] {e}")
         return []
 
@@ -3480,7 +3480,7 @@ def mark_join_done(req_id, result):
         c.execute("UPDATE userbot_join_queue SET status='done', result=?, processed_at=CURRENT_TIMESTAMP WHERE id=?", (result, req_id))
         conn.commit()
         conn.close()
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print(f"[MARK JOIN ERR] {e}")
 
 # ═══════════════════════════════════════════════
@@ -3495,7 +3495,7 @@ def get_global(key, default=None):
         r = c.execute("SELECT value FROM global_settings WHERE key=?", (key,)).fetchone()
         c.close()
         return r[0] if r else default
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return default
 
 
@@ -3512,7 +3512,7 @@ def set_global(key, value):
         c.commit()
         c.close()
         return True
-    except Exception as e:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError) as e:
         print("[set_global] " + str(e))
         return False
 
@@ -3540,5 +3540,5 @@ def get_all_globals():
         rows = c.execute("SELECT key, value FROM global_settings").fetchall()
         c.close()
         return dict(rows)
-    except Exception:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.IntegrityError):
         return {}
