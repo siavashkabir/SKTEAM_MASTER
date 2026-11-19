@@ -10,6 +10,14 @@
 | `melody-player/` | پلیر ویس‌چت (Proot Ubuntu) |
 | `webpanel/` | پنل وب (Cloudflare Worker + فرانت‌اند ثابت) |
 
+## تغییرات بزرگ (نسخهٔ copilot-fixes)
+
+✅ **Turso Migration**: تمام فایل‌ها از `sqlite3` لوکال به `turso_db.py` (wrapper با fallback) منتقل شدند.
+✅ **Security**: تمام توکن‌ها و کلید‌های API (MANAGER_BOT_TOKEN، SIGHTENGINE_SECRET، MUSIC_BOT_API_KEY) از کد حذف شده و به متغیرهای محیطی منتقل شدند.
+✅ **Error Handling**: بهبود مدیریت خطاها در `database.py`، `userbot_service.py`، و `db.py` (logging، specific exception types، resource cleanup).
+✅ **requirements.txt**: آپدیت در تمام بات‌ها (libsql-client، تصحیح ورژن‌ها).
+✅ **Web Panel**: پنل وب جدید (Cloudflare Worker) برای مرورگری دیتابیس Turso/Supabase.
+
 ## دیتابیس (Turso)
 تمام فایل‌ها به‌جای `sqlite3` از ماژول `turso_db.py` (سازگار با API ‏sqlite3، مبتنی بر `libsql-client`) استفاده می‌کنند.
 - اگر `TURSO_DATABASE_URL` تنظیم باشد → اتصال به Turso.
@@ -87,3 +95,15 @@ npm run deploy
 
 ## ⚠️ امنیت
 توکن‌ها و کلیدهایی که قبلاً در کد/تاریخچهٔ git بودند (توکن دو ربات، Sightengine، کلیدهای Music API، `.env.BACKUP`، `telethon_session.txt`، `cookies_yt.txt`) لو رفته‌اند: **حتماً همه را عوض (revoke) کنید.** این فایل‌ها از ردیابی git خارج و در `.gitignore` قرار گرفتند.
+
+## مدیریت خطاها (Error Handling)
+
+**بهبود‌های اعمال‌شده:**
+- `database.py`: تابع `_safe_execute()` برای اجرای امن SQL (auto-close، logging، fallback)، معالجهٔ خاص استثناء‌ها (OperationalError، IntegrityError، DatabaseError).
+- `userbot_service.py`: logging درست (به‌جای print)، try/finally برای بسته‌کردن اتصال.
+- `skteam_music/db.py`: logging، specific exception types، resource cleanup مطابق مدل.
+- تمام ماژول‌ها: syntax check شده‌اند و خطایی وجود ندارند.
+
+**ویژگی‌های جدید:**
+- Timeout دیتابیس: `timeout=5` برای جلوگیری از hang‌ها.
+- Logging structured: تمام خطا‌های دیتابیس و بیان‌شده است (نه silent swallow).
