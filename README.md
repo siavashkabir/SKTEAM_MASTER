@@ -70,6 +70,8 @@ bash ~/start_all.sh
 ```
 `sk_media/server.py` با venv ‏groupbot اجرا می‌شود؛ `pip install -r ~/sk_media/requirements.txt` را در همان venv بزنید.
 
+`start_all.sh` سرویس‌ها را با PID فایل‌های مستقل در `~/.skteam_services` مدیریت می‌کند. اجرای مجدد فقط فرایندهایی را که توسط همین اسکریپت ثبت شده‌اند متوقف می‌کند؛ برای تغییر محل پروژه یا لاگ‌ها می‌توان `SKTEAM_ROOT` و `SKTEAM_LOG_DIR` را تنظیم کرد.
+
 ## اجرا در Proot (پلیر)
 ```bash
 proot-distro install ubuntu
@@ -92,6 +94,7 @@ npm run deploy
 ```
 بررسی: `curl https://<worker>.workers.dev/api/health` ← `{"ok":true,"turso":"ok","supabase":"ok"}`.
 مسیرهای API (به‌جز health نیاز به `Authorization: Bearer $ADMIN_TOKEN`): `/api/turso/tables`, `/api/turso/table/<name>`, `/api/supabase/<table>`.
+کد Worker به‌صورت ماژول‌های مستقل برای پاسخ HTTP، Turso، Supabase و مسیرها نگه‌داری می‌شود؛ فایل‌های استایل و اسکریپت رابط نیز از HTML جدا هستند.
 
 ## ⚠️ امنیت
 توکن‌ها و کلیدهایی که قبلاً در کد/تاریخچهٔ git بودند (توکن دو ربات، Sightengine، کلیدهای Music API، `.env.BACKUP`، `telethon_session.txt`، `cookies_yt.txt`) لو رفته‌اند: **حتماً همه را عوض (revoke) کنید.** این فایل‌ها از ردیابی git خارج و در `.gitignore` قرار گرفتند.

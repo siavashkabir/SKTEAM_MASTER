@@ -20,7 +20,7 @@ def _sk_acquire_lock(_name):
 # ═══ end lock ═══
 
 """Sk.Team Music Bot - v3 with inline panel"""
-import os, sys, re, time, asyncio, logging, random
+import os, sys, re, time, asyncio, logging, random, sqlite3, subprocess
 from pathlib import Path
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -52,7 +52,7 @@ import os as _os2
 try:
     from dotenv import load_dotenv as _ld2
     _ld2(_os2.path.expanduser("~/.env"))
-except Exception:
+except (ImportError, OSError, FileNotFoundError):
     pass
 BOT_TOKEN = _os2.environ.get("MUSIC_BOT_TOKEN", "")
 if not BOT_TOKEN:
@@ -101,9 +101,9 @@ def _sub_is_active(chat_id, sub_type):
         try:
             exp = _dt.strptime(exp_str.split()[0], "%Y-%m-%d")
             return exp > _dt.now()
-        except Exception:
+        except (ValueError, AttributeError, IndexError):
             return False
-    except Exception as e:
+    except (OSError, sqlite3.DatabaseError) as e:
         log.warning(f"[sub] err: {e}")
         return False
 
@@ -127,9 +127,9 @@ def _sub_days(chat_id, sub_type):
             exp = _dt.strptime(r[0].split()[0], "%Y-%m-%d")
             delta = (exp - _dt.now()).days
             return max(0, delta)
-        except Exception:
+        except (ValueError, AttributeError, IndexError, TypeError):
             return 0
-    except Exception:
+    except (OSError, sqlite3.DatabaseError):
         return 0
 
 
@@ -147,7 +147,7 @@ async def _auto_delete_task(key, sec, msg):
         await asyncio.sleep(sec)
         try:
             await msg.delete()
-        except Exception:
+        except (AttributeError, TypeError):
             pass
     except asyncio.CancelledError:
         pass
@@ -163,7 +163,7 @@ def schedule_delete(context, msg, sec=40):
     old = _panel_timers.get(key)
     if old:
         try: old['task'].cancel()
-        except Exception: pass
+        except (AttributeError, asyncio.InvalidStateError): pass
     task = context.application.create_task(_auto_delete_task(key, sec, msg))
     _panel_timers[key] = {'task': task, 'sec': sec, 'msg': msg}
 
@@ -179,12 +179,12 @@ def reset_panel_timer(chat_id, message_id):
     old_task = info.get('task')
     if old_task:
         try: old_task.cancel()
-        except Exception: pass
+        except (AttributeError, asyncio.InvalidStateError): pass
     try:
         loop = asyncio.get_event_loop()
         new_task = loop.create_task(_auto_delete_task(key, sec, msg))
         info['task'] = new_task
-    except Exception:
+    except (RuntimeError, asyncio.InvalidStateError):
         pass
 
 # ─── auth ───
@@ -203,7 +203,7 @@ async def can_play(uid, cid):
             _c.close()
             if _r:
                 return True
-    except Exception:
+    except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError):
         pass
     # ★ مالک پلیر
     try:
@@ -217,7 +217,7 @@ async def can_play(uid, cid):
         _c.close()
         if _r:
             return True
-    except Exception:
+    except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError):
         pass
     return db.is_music_authorized(cid, uid)
 
@@ -236,7 +236,8 @@ async def _record_play(cid, uid, query, title="", source=""):
             if u:
                 fname = u[0] or ""
                 uname = u[1] or ""
-        except: pass
+        except (OSError, sqlite3.DatabaseError, TypeError, AttributeError):
+            pass
         c.execute("""INSERT INTO music_plays 
                      (chat_id, user_id, first_name, username, query, title, source, played_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -244,7 +245,7 @@ async def _record_play(cid, uid, query, title="", source=""):
                    _dt.now().strftime("%Y-%m-%d %H:%M:%S")))
         c.commit()
         c.close()
-    except Exception as e:
+    except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError) as e:
         log.debug(f"record_play: {e}")
 
 
@@ -282,7 +283,7 @@ async def add_to_queue(cid, query, uid, uname):
             })
             d = r.json()
             return d.get("size", 0)
-    except Exception as e:
+    except (httpx.RequestError, httpx.HTTPError, ValueError) as e:
         log.warning(f"queue add err: {e}")
         return 0
 
@@ -292,7 +293,7 @@ async def post_cmd(payload):
         async with httpx.AsyncClient(timeout=10) as h:
             r = await h.post(f"{SK_SERVER}/command", json=payload)
             return r.json()
-    except Exception as e:
+    except (httpx.RequestError, httpx.HTTPError, ValueError) as e:
         return {"ok": False, "error": str(e)}
 
 async def get_srv(path, params=None):
@@ -300,7 +301,7 @@ async def get_srv(path, params=None):
         async with httpx.AsyncClient(timeout=5) as h:
             r = await h.get(f"{SK_SERVER}{path}", params=params or {})
             return r.json()
-    except Exception as e:
+    except (httpx.RequestError, httpx.HTTPError, ValueError) as e:
         return {"ok": False, "error": str(e)}
 
 # ─── parsers ───
@@ -371,7 +372,7 @@ async def open_panel(update, context, from_cb=False):
     if from_cb:
         try:
             await update.callback_query.edit_message_text(text, reply_markup=kb)
-        except Exception as e:
+        except (AttributeError, TypeError) as e:
             log.warning(f"edit failed: {e}")
     else:
         m = await update.effective_message.reply_text(text, reply_markup=kb)
@@ -385,14 +386,14 @@ async def send_panel_with_gif(bot, cid, text, kb, gif_file_id, delete_old_msg_id
     """ارسال پنل با GIF بالا"""
     if delete_old_msg_id:
         try: await bot.delete_message(cid, delete_old_msg_id)
-        except: pass
+        except (AttributeError, TypeError): pass
     try:
         m = await bot.send_animation(
             chat_id=cid, animation=gif_file_id,
             caption=text, reply_markup=kb,
         )
         return m
-    except Exception as e:
+    except (httpx.HTTPError, ValueError) as e:
         log.warning(f"send_animation err: {e}")
         m = await bot.send_message(cid, text, reply_markup=kb)
         return m
@@ -410,7 +411,7 @@ async def edit_panel_gif(bot, cid, msg_id, text, kb, gif_file_id):
             caption=text, reply_markup=kb,
         )
         return True
-    except Exception as e:
+    except (ValueError, AttributeError, TypeError) as e:
         err = str(e).lower()
         if "not modified" in err:
             return True
@@ -421,7 +422,7 @@ async def edit_panel_gif(bot, cid, msg_id, text, kb, gif_file_id):
                 reply_markup=kb,
             )
             return True
-        except Exception as e2:
+        except (ValueError, AttributeError, TypeError) as e2:
             if "not modified" not in str(e2).lower():
                 log.debug(f"edit gif panel: {e2}")
             return False
@@ -441,7 +442,7 @@ def render_panel_with_extras(skin, data, chat_id):
         else:
             rows.append([new_btn])
         kb = InlineKeyboardMarkup(rows)
-    except Exception as e:
+    except (AttributeError, TypeError, KeyError) as e:
         log.debug(f"skin btn err: {e}")
     return text, kb
 
@@ -465,7 +466,7 @@ async def open_live_panel(bot, chat_id, owner_uid, skin=None, force_new=False):
                 caption=text, reply_markup=kb
             )
             success = True
-        except Exception as e1:
+        except (ValueError, AttributeError, TypeError) as e1:
             if "not modified" in str(e1).lower():
                 success = True
             else:
@@ -476,7 +477,7 @@ async def open_live_panel(bot, chat_id, owner_uid, skin=None, force_new=False):
                         message_id=msg_id, reply_markup=kb
                     )
                     success = True
-                except Exception as e2:
+                except (ValueError, AttributeError, TypeError) as e2:
                     if "not modified" in str(e2).lower():
                         success = True
                     else:
@@ -496,7 +497,7 @@ async def open_live_panel(bot, chat_id, owner_uid, skin=None, force_new=False):
             gif = _gm.active(chat_id)
             if gif:
                 gif_id = gif["file_id"]
-    except Exception as e:
+    except (ImportError, AttributeError, KeyError, OSError) as e:
         log.debug(f"gif check: {e}")
 
     # ─── پنل جدید بساز ───
@@ -534,7 +535,7 @@ async def close_live_panel(bot, chat_id):
     info = active_panels.pop(chat_id)
     try:
         await bot.delete_message(chat_id, info["msg_id"])
-    except Exception:
+    except (ValueError, AttributeError, TypeError):
         pass
 
 
@@ -582,9 +583,9 @@ async def panel_updater_loop(app):
                                 )
                             _or.remove(_path)
                             log.info(f"[rec] sent to owner: {_or.path.basename(_path)}")
-                        except Exception as _er:
+                        except (httpx.HTTPError, OSError, ValueError) as _er:
                             log.warning(f"[rec] send err: {_er}")
-        except Exception as _er:
+        except (httpx.RequestError, httpx.HTTPError, ValueError) as _er:
             log.debug(f"pending_records err: {_er}")
 
         # ★ چک download files
@@ -609,9 +610,9 @@ async def panel_updater_loop(app):
                                 )
                             _os.remove(_tnx)
                             log.info(f"[dl_file] sent: {_f.get('title')}")
-                        except Exception as _e:
+                        except (httpx.HTTPError, OSError, ValueError) as _e:
                             log.warning(f"[dl_file] send err: {_e}")
-        except Exception as _e:
+        except (httpx.RequestError, httpx.HTTPError, ValueError) as _e:
             log.debug(f"pending err: {_e}")
 
         if not active_panels:
@@ -642,7 +643,8 @@ async def panel_updater_loop(app):
                         log.info(f"panel auto-close: {chat_id}")
                         try:
                             await app.bot.send_message(chat_id, "⏹ پخش تموم شد")
-                        except: pass
+                        except (httpx.HTTPError, ValueError):
+                            pass
                         await close_live_panel(app.bot, chat_id)
                         not_playing_counter.pop(chat_id, None)
                         continue
@@ -676,10 +678,10 @@ async def panel_updater_loop(app):
                             text=text, chat_id=chat_id,
                             message_id=info["msg_id"], reply_markup=kb
                         )
-                    except Exception as e:
+                    except (ValueError, AttributeError, TypeError) as e:
                         if "not modified" not in str(e).lower():
                             log.debug(f"edit skip: {e}")
-            except Exception as e:
+            except (OSError, sqlite3.DatabaseError, ValueError) as e:
                 log.warning(f"panel loop err: {e}")
 
 
@@ -712,7 +714,8 @@ async def _cookie_alert_loop(app):
                                 f"📅 سن: {age_days} روز\n"
                                 f"💡 نزدیک انقضاست، آپدیت کن:\n"
                                 f"/me → 🔐 کوکی → 🔄 آپدیت")
-                        except: pass
+                        except (httpx.HTTPError, ValueError):
+                            pass
                         last_alerts[key] = now
                 # هشدار جدی ۶۰ روز
                 elif age_days >= 60:
@@ -723,10 +726,11 @@ async def _cookie_alert_loop(app):
                                 f"⚠️ **هشدار جدی کوکی {idx}**\n"
                                 f"📅 سن: {age_days} روز\n"
                                 f"🚨 ممکنه YouTube از کار بیفته!")
-                        except: pass
+                        except (httpx.HTTPError, ValueError):
+                            pass
                         last_alerts[key] = now
             await asyncio.sleep(6 * 3600)  # هر ۶ ساعت
-        except Exception as e:
+        except (OSError, ValueError) as e:
             log.warning(f"[COOKIE-ALERT] {e}")
             await asyncio.sleep(3600)
 
@@ -738,7 +742,8 @@ async def refresh_menus(app):
     try:
         try:
             await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
-        except: pass
+        except (ValueError, AttributeError, TypeError):
+            pass
 
         grp = [
             BotCommand("start", "شروع"),
@@ -763,11 +768,11 @@ async def refresh_menus(app):
                 BotCommand("bio", "درباره ربات"),
             ]
             await app.bot.set_my_commands(own, scope=BotCommandScopeChat(chat_id=OWNER_ID))
-        except Exception as e:
+        except (ValueError, AttributeError, TypeError) as e:
             log.warning(f"[MENU-OWNER] {e}")
 
         log.info("[MENU] all set")
-    except Exception as e:
+    except (ValueError, AttributeError, TypeError) as e:
         log.warning(f"[MENU] {e}")
 
 
@@ -777,7 +782,7 @@ async def post_init(app):
     try:
         import broadcast_worker
         broadcast_worker.start(app)
-    except Exception as _bw:
+    except (ImportError, AttributeError) as _bw:
         log.warning(f"broadcast_worker err: {_bw}")
 
     """راه‌اندازی job پس از start"""
@@ -809,7 +814,7 @@ async def cmd_pv_panel(update, context):
                                  INNER JOIN group_owners go ON g.chat_id = go.chat_id
                                  WHERE go.user_id=?
                                  ORDER BY g.title""", (uid,)).fetchall()
-        except Exception:
+        except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError):
             rows = []
     _c.close()
 
@@ -834,7 +839,7 @@ async def cmd_pv_panel(update, context):
             _hc = _sq.connect(str(_db), timeout=5)
             _h_count = _hc.execute("SELECT COUNT(*) FROM helpers WHERE enabled=1").fetchone()[0]
             _hc.close()
-        except Exception:
+        except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError, TypeError):
             _h_count = 0
         admin_kb = [
             [InlineKeyboardButton("👑 مدیریت سودوها", callback_data="adm_sudo_menu")],
@@ -874,7 +879,8 @@ async def cmd_pv_panel(update, context):
                              (cid,)).fetchone()
             if _r: _en, _clip_sec = _r[0], _r[1]
             _c2.close()
-        except: pass
+        except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError, TypeError):
+            pass
         _clip_lbl = {60:"۱د",180:"۳د",300:"۵د",600:"۱۰د",900:"۱۵د",1800:"۳۰د",3600:"۱س"}.get(_clip_sec, f"{_clip_sec}s")
 
         m_txt = f"🎵 موزیک: {'✅ فعال (' + str(m_days) + ' روز)' if has_music else '❌ غیرفعال'}"
@@ -958,7 +964,7 @@ async def cmd_start(update, context):
                                             WHERE go.user_id=?
                                             ORDER BY g.title""",
                                           (uid,)).fetchall()
-            except Exception:
+            except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError):
                 user_groups = []
         _c.close()
 
@@ -1074,14 +1080,14 @@ async def edit_text_or_caption(q, text, kb, parse_mode=None):
     try:
         await q.edit_message_caption(caption=text, reply_markup=kb, parse_mode=parse_mode)
         return True
-    except Exception as e1:
+    except (ValueError, AttributeError, TypeError) as e1:
         if "not modified" in str(e1).lower():
             return True
     # ۲. text
     try:
         await q.edit_message_text(text=text, reply_markup=kb, parse_mode=parse_mode)
         return True
-    except Exception as e2:
+    except (ValueError, AttributeError, TypeError) as e2:
         if "not modified" in str(e2).lower():
             return True
         log.warning(f"edit_text_or_caption fail: {e2}")
@@ -1099,7 +1105,7 @@ async def safe_edit(q, text, kb):
         await q.edit_message_caption(caption=text, reply_markup=kb)
         log.warning("[EDIT] ✅ caption")
         return True
-    except Exception as e:
+    except (ValueError, AttributeError, TypeError) as e:
         e_l = str(e).lower()
         log.warning(f"[EDIT] cap FAIL: {e}")
         if "not modified" in e_l: return True
@@ -1108,7 +1114,7 @@ async def safe_edit(q, text, kb):
         await q.edit_message_text(text=text, reply_markup=kb)
         log.warning("[EDIT] ✅ text")
         return True
-    except Exception as e:
+    except (ValueError, AttributeError, TypeError) as e:
         e_l = str(e).lower()
         log.warning(f"[EDIT] txt FAIL: {e}")
         if "not modified" in e_l: return True
@@ -1149,12 +1155,13 @@ async def cb_handler(update, context):
     """wrapper با crash log"""
     try:
         await _cb_impl(update, context)
-    except Exception as e:
+    except (OSError, ValueError, sqlite3.DatabaseError, KeyError, AttributeError) as e:
         import traceback
         log.warning(f"[CB_CRASH] {e}\n{traceback.format_exc()}")
         try:
             await update.callback_query.answer(f"err: {e}", show_alert=True)
-        except: pass
+        except (ValueError, AttributeError, TypeError):
+            pass
 
 
 async def _cb_impl(update, context):
@@ -1164,17 +1171,17 @@ async def _cb_impl(update, context):
     try:
         if q.message:
             reset_panel_timer(q.message.chat.id, q.message.message_id)
-    except Exception as _e:
+    except (ValueError, AttributeError, TypeError) as _e:
         log.warning(f"[CB_RESET] {_e}")
     try:
         await q.answer()
-    except Exception as e:
+    except (ValueError, AttributeError, TypeError) as e:
         log.warning(f"[CB_ANSWER] {e}")
     try:
         cid = q.message.chat.id
         uid = q.from_user.id
         u = q.from_user
-    except Exception as e:
+    except (ValueError, AttributeError, TypeError) as e:
         log.warning(f"[CB_PARSE] {e}")
         return
     log.warning(f"[CB_PARSE] cid={cid} uid={uid}")
@@ -1188,7 +1195,7 @@ async def _cb_impl(update, context):
     # ═══════════════════════════════════════
     if data == "menu_close":
         try: await q.message.delete()
-        except: pass
+        except (ValueError, AttributeError, TypeError): pass
         return
 
     if data == "pv_noop":
@@ -1204,7 +1211,7 @@ async def _cb_impl(update, context):
             _hc2 = _sq2.connect(str(Path.home() / "groupbot" / "data" / "groupbot.db"), timeout=5)
             _h_count2 = _hc2.execute("SELECT COUNT(*) FROM helpers WHERE enabled=1").fetchone()[0]
             _hc2.close()
-        except Exception:
+        except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError, TypeError):
             _h_count2 = 0
         admin_kb = [
             [InlineKeyboardButton("👑 مدیریت سودوها", callback_data="adm_sudo_menu")],
@@ -1221,7 +1228,7 @@ async def _cb_impl(update, context):
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(admin_kb),
             )
-        except Exception as e:
+        except (ValueError, AttributeError, TypeError) as e:
             log.warning(f"adm_panel err: {e}")
         return
 
@@ -1244,7 +1251,7 @@ async def _cb_impl(update, context):
         t2 += "\n💡 افزودن/حذف: با ریپلای بنویس `افزودن سودو`"
         kb2 = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_panel")]]
         try: await q.edit_message_text(t2, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb2))
-        except: pass
+        except (ValueError, AttributeError, TypeError): pass
         return
 
     if data == "adm_cookie_menu":
@@ -1282,7 +1289,7 @@ async def _cb_impl(update, context):
         ]
         try:
             await q.edit_message_text(t2, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb2))
-        except Exception as e:
+        except (ValueError, AttributeError, TypeError) as e:
             if "not modified" not in str(e).lower():
                 log.warning(f"cookie_menu err: {e}")
         return
@@ -1305,7 +1312,7 @@ async def _cb_impl(update, context):
             )
             out = _sp.check_output(["bash", "-c", cmd], timeout=45).decode()
             await q.message.reply_text("🔍 نتیجه:\n" + out[:500])
-        except Exception as e:
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
             await q.message.reply_text("❌ خطا: " + str(e)[:200])
         return
 
@@ -1569,7 +1576,7 @@ async def _cb_impl(update, context):
             _c2.close()
             await q.answer(f"✅ اعمال روی {len(rows)} گروه", show_alert=True)
             log.info(f"[GSET] apply_all: cleared {len(rows)} chat overrides")
-        except Exception as e:
+        except (OSError, sqlite3.DatabaseError, ValueError) as e:
             await q.answer(f"❌ {e}", show_alert=True)
         return
 
@@ -1580,10 +1587,11 @@ async def _cb_impl(update, context):
             import helper_cmd as _hc
             _txt, _kb = _hc.build_helpers_menu(back_cb="adm_panel")
             await q.edit_message_text(_txt, parse_mode="Markdown", reply_markup=_kb)
-        except Exception as _e:
+        except (ImportError, AttributeError, ValueError) as _e:
             try:
                 await q.answer("خطا: " + str(_e)[:80], show_alert=True)
-            except Exception: pass
+            except (ValueError, AttributeError, TypeError):
+                pass
         return
 
     if data == "adm_playstats":
@@ -1629,7 +1637,7 @@ async def _cb_impl(update, context):
                 t2 += "\n⏰ **ساعات پرپخش:**\n"
                 for h, n in _hrs:
                     t2 += "• ساعت " + str(h) + ":00 — " + str(n) + " پخش\n"
-        except Exception:
+        except (OSError, sqlite3.DatabaseError, sqlite3.OperationalError):
             pass
 
         t2 += "\n🎵 **محبوب‌ترین آهنگ‌ها:**\n"
@@ -1641,7 +1649,7 @@ async def _cb_impl(update, context):
         kb2 = [[InlineKeyboardButton("🔙 بازگشت", callback_data="adm_tools_menu")]]
         try:
             await q.edit_message_text(t2, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb2))
-        except Exception as e:
+        except (ValueError, AttributeError, TypeError) as e:
             log.warning(f"playstats: {e}")
         return
 
@@ -1657,7 +1665,7 @@ async def _cb_impl(update, context):
             [InlineKeyboardButton("🔙 بازگشت", callback_data="adm_panel")],
         ]
         try: await q.edit_message_text("🔧 **ابزارها**", reply_markup=InlineKeyboardMarkup(kb2))
-        except: pass
+        except (ValueError, AttributeError, TypeError): pass
         return
 
     if data.startswith("adm_tool:"):
@@ -1670,7 +1678,7 @@ async def _cb_impl(update, context):
                 script = "ps aux | grep -E 'main.py|bot.py|server.py|player.py' | grep -v grep | wc -l"
                 out = _sp.check_output(["bash", "-c", script], timeout=5).decode().strip()
                 await q.answer("زنده: " + out + " سرویس", show_alert=True)
-            except:
+            except (OSError, subprocess.TimeoutExpired, ValueError):
                 await q.answer("خطا", show_alert=True)
             return
         if tool == "log":
@@ -1678,7 +1686,7 @@ async def _cb_impl(update, context):
                 lf = Path.home() / "sk_media" / "logs" / "player.log"
                 content = lf.read_text()[-1500:] if lf.exists() else "لاگ نیست"
                 await q.message.reply_text("🔍 آخرین لاگ:\n" + content)
-            except Exception as e:
+            except (OSError, ValueError) as e:
                 await q.message.reply_text("خطا: " + str(e)[:200])
             return
         if tool == "player":

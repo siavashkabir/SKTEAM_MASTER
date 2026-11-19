@@ -1,93 +1,120 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# ═══ SK-START-LOCK — جلوگیری از اجرای دوگانه ═══
-LOCKDIR="$HOME/.skteam_start.lock.d"
-if ! mkdir "$LOCKDIR" 2>/dev/null; then
-    echo "⚠️ start_all.sh قبلاً در حال اجراست → خروج"
+
+set -euo pipefail
+
+ROOT="${SKTEAM_ROOT:-$HOME}"
+LOG_DIR="${SKTEAM_LOG_DIR:-$HOME/logs}"
+STATE_DIR="${SKTEAM_STATE_DIR:-$HOME/.skteam_services}"
+LOCK_DIR="$STATE_DIR/start.lock"
+
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "start_all.sh قبلاً در حال اجراست؛ خروج."
     exit 0
 fi
-trap "rmdir '$LOCKDIR' 2>/dev/null" EXIT INT TERM
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
-# Sk.Team — راه‌اندازی همه ۵ سرویس (11T Native + Player proot)
-set -e
-LOG_DIR="$HOME/logs"
-mkdir -p "$LOG_DIR" "$HOME/sk_media/logs"
+stop_service() {
+    local name="$1"
+    local pid_file="$STATE_DIR/$name.pid"
+    local pid
+
+    [[ -f "$pid_file" ]] || return 0
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null || true
+        for _ in {1..50}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+}
+
+start_service() {
+    local name="$1"
+    local delay="$2"
+    local log="$3"
+    shift 3
+
+    : > "$log"
+    setsid "$@" < /dev/null > "$log" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$STATE_DIR/$name.pid"
+    sleep "$delay"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "سرویس $name راه‌اندازی نشد؛ لاگ: $log" >&2
+        return 1
+    fi
+    echo "▶ $name آماده شد (PID $pid)"
+}
+
+python_service() {
+    local name="$1"
+    local delay="$2"
+    local directory="$3"
+    local venv="$4"
+    local script="$5"
+
+    local log="$LOG_DIR/$name.log"
+    start_service "$name" "$delay" "$log" \
+        bash -c 'cd "$1" && source "$2/bin/activate" && exec python3 -u "$3"' \
+        bash "$directory" "$venv" "$script"
+}
+
+for service in groupbot music userbot server player watchdog; do
+    stop_service "$service"
+done
 
 echo "════════ شروع $(date) ════════"
 
-# کشتن سرویس‌های قبلی
-pkill -9 -f "python3 -u main.py" 2>/dev/null || true
-pkill -9 -f "python3 -u bot.py" 2>/dev/null || true
-pkill -9 -f "sk_media/server.py" 2>/dev/null || true
-pkill -9 -f "userbot_service.py" 2>/dev/null || true
-pkill -9 -f "player.py" 2>/dev/null || true
-pkill -9 -f "proot --kill-on-exit" 2>/dev/null || true
-sleep 4
+python_service server 3 "$ROOT/sk_media" "$ROOT/groupbot/venv" "$ROOT/sk_media/server.py"
+python_service groupbot 8 "$ROOT/groupbot" "$ROOT/groupbot/venv" "$ROOT/groupbot/main.py"
+python_service music 8 "$ROOT/skteam_music" "$ROOT/skteam_music/venv" "$ROOT/skteam_music/bot.py"
+python_service userbot 5 "$ROOT/groupbot" "$ROOT/groupbot/venv" "$ROOT/groupbot/userbot_service.py"
 
-# ۱. Media Server
-echo "▶ Media Server..."
-cd $HOME/groupbot && source venv/bin/activate
-: > $LOG_DIR/server.log
-setsid python3 -u $HOME/sk_media/server.py < /dev/null > $LOG_DIR/server.log 2>&1 &
-sleep 4 && deactivate
-
-# ۲. ربات مدیریت
-echo "▶ ربات مدیریت..."
-cd $HOME/groupbot && source venv/bin/activate
-: > $LOG_DIR/groupbot.log
-setsid python3 -u main.py < /dev/null > $LOG_DIR/groupbot.log 2>&1 &
-sleep 10 && deactivate
-
-# ۳. ربات موزیک
-echo "▶ ربات موزیک..."
-cd $HOME/skteam_music && source venv/bin/activate
-: > $LOG_DIR/music.log
-setsid python3 -u bot.py < /dev/null > $LOG_DIR/music.log 2>&1 &
-sleep 10 && deactivate
-
-# ۴. Userbot
-echo "▶ Userbot..."
-cd $HOME/groupbot && source venv/bin/activate
-: > $LOG_DIR/userbot.log
-setsid python3 -u userbot_service.py < /dev/null > $LOG_DIR/userbot.log 2>&1 &
-sleep 6 && deactivate
-
-# ۵. Player (proot)
-echo "▶ Player (proot)..."
-: > $HOME/sk_media/logs/player.log
-setsid proot-distro login ubuntu --isolated -- bash -c '
-cd /root/sk_media && \
-set -a && source /root/melody-player/.env && set +a && \
-export MUSIC_BOT_API_KEY="${MUSIC_BOT_API_KEY:?set MUSIC_BOT_API_KEY in ~/.env}" && \
-source /root/melody-player/venv/bin/activate && \
-exec python3 -u player.py
-' < /dev/null > $HOME/sk_media/logs/player.log 2>&1 &
-sleep 15
-
-echo ""
-echo "════ سرویس‌های زنده ════"
-ps aux | grep -E "main\.py|bot\.py|server\.py|player\.py|userbot_service" | grep -v grep
-echo ""
-echo "════════ تموم شد $(date) ════════"
-
-
-# ───── Watchdog ─────
-echo "▶ Watchdog..."
-pkill -9 -f "watchdog.py" 2>/dev/null || true
-sleep 1
-: > $HOME/logs/watchdog.log
-setsid python3 -u $HOME/watchdog.py < /dev/null > $HOME/logs/watchdog.log 2>&1 &
-sleep 3
-echo "✅ Watchdog راه‌اندازی شد"
-
-
-# ───── SSH Server ─────
-echo "▶ SSH Server..."
-pkill -9 sshd 2>/dev/null || true
-sleep 2
-sshd
-sleep 2
-if ps aux | grep -q "[s]shd"; then
-    echo "✅ SSH Server زنده"
+echo "▶ راه‌اندازی Player..."
+player_log="$LOG_DIR/player.log"
+if command -v proot-distro >/dev/null 2>&1; then
+    start_service player 10 "$player_log" \
+        proot-distro login ubuntu --isolated -- \
+        bash -c '
+            set -e
+            cd /root/sk_media
+            set -a
+            source /root/melody-player/.env
+            set +a
+            : "${MUSIC_BOT_API_KEY:?MUSIC_BOT_API_KEY is required}"
+            source /root/melody-player/venv/bin/activate
+            exec python3 -u player.py
+        '
 else
-    echo "❌ SSH Server راه نیفتاد"
+    echo "proot-distro پیدا نشد؛ Player اجرا نمی‌شود." >&2
 fi
+
+if [[ -f "$ROOT/watchdog.py" ]]; then
+    echo "▶ راه‌اندازی Watchdog..."
+    start_service watchdog 2 "$LOG_DIR/watchdog.log" python3 -u "$ROOT/watchdog.py"
+else
+    echo "فایل $ROOT/watchdog.py پیدا نشد؛ Watchdog اجرا نمی‌شود."
+fi
+
+if command -v sshd >/dev/null 2>&1; then
+    if ! pgrep -x sshd >/dev/null 2>&1; then
+        sshd
+    fi
+    echo "▶ SSH daemon بررسی شد."
+fi
+
+echo "════════ سرویس‌های فعال ════════"
+for pid_file in "$STATE_DIR"/*.pid; do
+    [[ -e "$pid_file" ]] || continue
+    name="$(basename "$pid_file" .pid)"
+    pid="$(cat "$pid_file")"
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "$name: فعال (PID $pid)"
+    else
+        echo "$name: متوقف شده" >&2
+    fi
+done

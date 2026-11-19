@@ -4,13 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SK.TEAM Panel</title>
-<style>
-body{font-family:system-ui,Tahoma,sans-serif;margin:0;padding:1rem;background:#0f172a;color:#e2e8f0}
-input,select,button{padding:.5rem;margin:.25rem;border-radius:6px;border:1px solid #334155;background:#1e293b;color:inherit}
-table{border-collapse:collapse;width:100%;font-size:.85rem;direction:ltr}
-td,th{border:1px solid #334155;padding:.3rem;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wrap{overflow:auto}#status{margin:.5rem 0}
-</style>
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <h2>🛹 SK.TEAM Panel</h2>
@@ -24,37 +18,6 @@ td,th{border:1px solid #334155;padding:.3rem;max-width:300px;overflow:hidden;tex
   <button id="list">لیست جدول‌ها (Turso)</button>
 </div>
 <div class="wrap"><table id="out"></table></div>
-<script>
-const $ = (id) => document.getElementById(id);
-$("token").value = sessionStorage.getItem("tok") || "";
-$("save").onclick = () => { sessionStorage.setItem("tok", $("token").value); };
-async function api(path) {
-  const r = await fetch(path, { headers: { authorization: "Bearer " + $("token").value } });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error ? d.error + (d.detail ? ": " + d.detail : "") : r.status);
-  return d;
-}
-function render(rows) {
-  const t = $("out"); t.textContent = "";
-  if (!rows.length) { t.textContent = "(empty)"; return; }
-  const cols = Object.keys(rows[0]);
-  const h = t.insertRow();
-  cols.forEach((c) => { const th = document.createElement("th"); th.textContent = c; h.appendChild(th); });
-  rows.forEach((r) => { const tr = t.insertRow(); cols.forEach((c) => { tr.insertCell().textContent = r[c] ?? ""; }); });
-}
-async function health() {
-  try { const d = await api("/api/health"); $("status").textContent = `Turso: ${d.turso} | Supabase: ${d.supabase}`; }
-  catch (e) { $("status").textContent = "health error: " + e.message; }
-}
-$("list").onclick = async () => { try { render((await api("/api/turso/tables")).tables.map((n) => ({ table: n }))); } catch (e) { alert(e.message); } };
-$("load").onclick = async () => {
-  try {
-    const n = encodeURIComponent($("table").value);
-    const d = await api($("src").value === "turso" ? "/api/turso/table/" + n : "/api/supabase/" + n);
-    render(Array.isArray(d) ? d : d.rows);
-  } catch (e) { alert(e.message); }
-};
-health();
-</script>
+<script type="module" src="/app.js"></script>
 </body>
 </html>
